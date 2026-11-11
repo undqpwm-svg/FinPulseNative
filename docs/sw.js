@@ -1,5 +1,5 @@
 // Сервис-воркер: сначала сеть, при отсутствии сети — кэш. Так правки демо видны сразу.
-const CACHE = 'finpuls-v2';
+const CACHE = 'finpuls-v3';
 const SHELL = ['./', './index.html', './css/app.css', './js/app.js', './js/views.js', './js/store.js', './js/ui.js', './js/util.js', './js/icons.js', './data/demo.json', './manifest.webmanifest', './icons/icon-192.png', './icons/apple-touch-icon.png'];
 
 self.addEventListener('install', (e) => {

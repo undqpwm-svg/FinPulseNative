@@ -4,7 +4,7 @@
 
 > **Это демо.** Сервера и подключения к 1С нет. Все организации, люди и суммы **выдуманы**, совпадения случайны.
 
-**Открыть:** https://app.smartsol.pro/
+**Открыть:** https://finpulse.smartsol.pro/
 
 ## Как открыть
 
@@ -64,14 +64,14 @@ screenshots/             скриншоты всех экранов (iPhone 13)
 ```bash
 node tests/e2e.cjs                 # локально, поднимает свой сервер
 node tests/e2e.cjs --shots         # + обновить скриншоты в /screenshots
-node tests/e2e.cjs https://app.smartsol.pro/   # опубликованный сайт
+node tests/e2e.cjs https://finpulse.smartsol.pro/   # опубликованный сайт
 ```
 
 Нужен Node.js 18+ и Playwright (`npm i -D playwright && npx playwright install chromium`).
 
 ## Публикация на GitHub Pages
 
-Settings → Pages → Build and deployment → Source: **Deploy from a branch** → ветка `claude/finpuls-mobile-demo-8vmvc5`, папка **/docs** → Save. Свой домен: файл `docs/CNAME` (`app.smartsol.pro`), DNS: CNAME `app.smartsol.pro` → `undqpwm-svg.github.io`, в настройках Pages — Custom domain и Enforce HTTPS. Все пути в приложении относительные, поэтому сайт работает в корне домена без пересборки.
+Settings → Pages → Build and deployment → Source: **Deploy from a branch** → ветка `claude/finpuls-mobile-demo-8vmvc5`, папка **/docs** → Save. Свой домен: файл `docs/CNAME` (`finpulse.smartsol.pro`), DNS: CNAME `finpulse.smartsol.pro` → `undqpwm-svg.github.io`, в настройках Pages — Custom domain и Enforce HTTPS. Все пути в приложении относительные, поэтому сайт работает в корне домена без пересборки.
 
 ---
 

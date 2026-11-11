@@ -935,3 +935,6 @@ html.framed .loadbar { top: 50px; left: 24px; right: 24px; }
 .partial-note b { display: block; font-size: 14px; color: var(--ink); }
 .partial-note .link-btn { margin-left: auto; color: var(--ink); text-decoration: underline; }
 
+/* раздел следующего этапа (501 not_implemented) — спокойно, без «Обновить» */
+.later-state .empty-ic { background: var(--lav); color: var(--ink); }
+.li-note-row small { color: var(--stone); }

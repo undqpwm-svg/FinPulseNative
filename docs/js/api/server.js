@@ -59,6 +59,7 @@ function codeByStatus(status) {
   if (status === 403) return 'forbidden';
   if (status === 404) return 'not_found';
   if (status === 429) return 'too_many_requests';
+  if (status === 501) return 'not_implemented'; // раздел этапа 2: сервер его пока не отдаёт
   if (status === 502 || status === 503 || status === 504) return 'server_unavailable';
   return 'server_error';
 }

@@ -102,7 +102,31 @@ export function errorText(e) {
 const errorIcon = (code) => (code === 'network' || code === 'timeout' ? I.info : code === 'forbidden' ? I.shield : I.alert);
 
 // Экран ошибки на месте экрана (с заголовком раздела и «Обновить»).
+// 501 not_implemented — раздел следующего этапа: не ошибка, спокойная заглушка без «Обновить».
+export const isLater = (e) => e instanceof ApiError && e.code === 'not_implemented';
+const later = new Set(); // разделы, которые сервер пока не отдаёт (501): главная не ведёт в них
+
+export function laterView(base = {}) {
+  return {
+    key: base.key || `later:${base.title || ''}`,
+    tab: base.tab,
+    depth: base.depth ?? 1,
+    nav: !!base.tab,
+    title: base.title,
+    html: `${base.tab ? '' : topbar(H(base.title || ''), base.back || '#/home')}
+      <div class="scroll ${base.tab ? '' : 'has-topbar'}">
+        ${base.tab ? `<div class="page-head"><h1 class="page-title">${H(base.title || '')}</h1></div>` : ''}
+        <div class="empty later-state" data-later>
+          <span class="empty-ic">${I.clock}</span>
+          <b>Раздел появится в следующей версии</b>
+          <span>Сейчас в приложении — главная и согласование заявок.</span>
+        </div>
+      </div>`,
+  };
+}
+
 export function errorView(e, base = {}) {
+  if (isLater(e)) return laterView(base);
   const t = errorText(e);
   if (base.text) [t.title, t.text] = base.text; // свой текст для экрана (например, «Нет связи с учётом компании»)
   return {
@@ -149,6 +173,7 @@ const isSessionEnd = (e) => e instanceof ApiError && (e.code === 'unauthorized' 
 // Общая обработка ошибок действий (не загрузки экрана).
 function actionError(e) {
   if (isSessionEnd(e)) return onUnauthorized(e);
+  if (isLater(e)) return toast('Раздел появится в следующей версии', 'info');
   const t = errorText(e);
   toast(`${t.title}. ${t.text}`, 'error');
 }
@@ -591,6 +616,9 @@ function spark(start, points) {
 views.home = async () => {
   const d = await api.home(api.orgId());
   const today = D(d.today);
+  // Календарь или отчёт ещё не подключены (501) — блоки главной из сводки остаются, но никуда не ведут.
+  const calOn = !later.has('calendar');
+  const go = (hash, on = calOn) => (on ? `data-go="${hash}"` : '');
   const u = d.user || (api.session() && api.session().user) || {};
   nav.badge = d.approvals.count;
 
@@ -600,24 +628,24 @@ views.home = async () => {
     const off = offset(d.gap.date, d.today);
     const when = off === 0 ? 'Сегодня' : cap(wdAcc(gd));
     const what = (d.gap.articles || []).map((a) => a.toLowerCase()).join(' и ');
-    alert = `<button class="alert-card" data-go="#/calendar/${d.gap.date}">
+    alert = `<${calOn ? 'button' : 'div'} class="alert-card" ${go(`#/calendar/${d.gap.date}`)}>
       <span class="alert-ic">${I.alert}</span>
       <span class="alert-body">
         <b>${when} не хватит ${moneyShort(d.gap.deficit)}</b>
         <span>${cap(relDay(off))}, ${dayMonth(gd)}${what ? `: ${H(what)} на ${moneyShort(d.gap.outflow)}` : ''}</span>
-        <span class="alert-cta">Открыть календарь ${I.arrowR}</span>
+        ${calOn ? `<span class="alert-cta">Открыть календарь ${I.arrowR}</span>` : ''}
       </span>
-    </button>`;
+    </${calOn ? 'button' : 'div'}>`;
   } else {
     const m = d.minBalance;
-    alert = `<button class="calm-card" data-go="#/calendar${m ? `/${m.date}` : ''}">
+    alert = `<${calOn ? 'button' : 'div'} class="calm-card" ${go(`#/calendar${m ? `/${m.date}` : ''}`)}>
       <span class="calm-ic">${I.shield}</span>
       <span class="alert-body">
         <b>Разрывов нет на ${Math.round((d.horizonDays || 28) / 7)} недели</b>
         ${m ? `<span>Минимальный остаток — ${moneyShort(m.amount)}, ${dayMonth(D(m.date))}</span>` : ''}
       </span>
-      ${I.chevR}
-    </button>`;
+      ${calOn ? I.chevR : ''}
+    </${calOn ? 'button' : 'div'}>`;
   }
 
   const a = d.approvals;
@@ -641,13 +669,14 @@ views.home = async () => {
   const thr = d.threshold || 0;
   const bars = week.map((x) => {
     const dt = D(x.date);
-    return `<button class="wk-col ${x.end < thr ? 'neg' : ''}" data-go="#/calendar/${x.date}" aria-label="${wdLong(dt)}, ${dayMonth(dt)}">
+    const tag = calOn ? 'button' : 'div';
+    return `<${tag} class="wk-col ${x.end < thr ? 'neg' : ''}" ${go(`#/calendar/${x.date}`)} aria-label="${wdLong(dt)}, ${dayMonth(dt)}">
       <span class="wk-bars">
         <i class="b-in" style="height:${Math.max(x.in ? 6 : 0, (x.in / maxBar) * 100)}%"></i>
         <i class="b-out" style="height:${Math.max(x.out ? 6 : 0, (x.out / maxBar) * 100)}%"></i>
       </span>
       <span class="wk-d">${offset(x.date, d.today) === 0 ? 'Сег' : wdShort(dt)}</span>
-    </button>`;
+    </${tag}>`;
   }).join('');
 
   const rec = d.receivables;
@@ -684,7 +713,7 @@ views.home = async () => {
       ${appr}
 
       <section class="card">
-        <div class="card-head"><h2>Ближайшие 7 дней</h2><button class="link-btn" data-go="#/calendar">Календарь ${I.chevR}</button></div>
+        <div class="card-head"><h2>Ближайшие 7 дней</h2>${calOn ? `<button class="link-btn" data-go="#/calendar">Календарь ${I.chevR}</button>` : ''}</div>
         <div class="kpi-row">
           <div class="kpi"><span class="kpi-label"><i class="sw sw-in"></i>Поступления</span><b class="pos">${moneyShort(wIn, { sign: true })}</b></div>
           <div class="kpi"><span class="kpi-label"><i class="sw sw-out"></i>Платежи</span><b>${moneyShort(-wOut)}</b></div>
@@ -692,14 +721,14 @@ views.home = async () => {
         <div class="wk-chart">${bars}</div>
       </section>
 
-      <button class="card rec-card" data-go="#/reports/debtors">
-        <span class="card-head"><h2>Нам должны</h2><span class="link-btn">Должники ${I.chevR}</span></span>
+      <${later.has('debtors') ? 'div' : 'button'} class="card rec-card" ${go('#/reports/debtors', !later.has('debtors'))}>
+        <span class="card-head"><h2>Нам должны</h2>${later.has('debtors') ? '' : `<span class="link-btn">Должники ${I.chevR}</span>`}</span>
         <span class="rec-sum">${moneyShort(rec.total)}</span>
         <span class="age-title">Долг по возрасту</span>
         ${ageBar(rec.aging, rec.total)}
         ${ageLegend(rec.aging)}
         ${rec.oldest ? `<span class="rec-worst">${I.clock}<span>Самый старый долг: ${H(rec.oldest.name)} — ${rec.oldest.days} ${plural(rec.oldest.days, DAY_FORMS)}</span></span>` : ''}
-      </button>
+      </${later.has('debtors') ? 'div' : 'button'}>
 
       <p class="foot-note">${I.refresh}<span>Данные 1С на ${d.asOf ? stampAt(d.asOf, d.today) : 'сейчас'}</span></p>
     </div>`,
@@ -814,7 +843,14 @@ function firstGap(cal) {
 
 views.calendar = async (params) => {
   const org = api.orgId();
-  const cal = await cached(`cal:${org}`, 60e3, () => api.calendar(org));
+  let cal;
+  try {
+    cal = await cached(`cal:${org}`, 60e3, () => api.calendar(org));
+  } catch (e) {
+    if (isLater(e)) later.add('calendar');
+    throw e;
+  }
+  later.delete('calendar');
   const ds = cal.days || [];
   if (!ds.length) {
     return {
@@ -1533,7 +1569,14 @@ function debtorsReport(rep) {
 views.reports = async (params) => {
   const org = api.orgId();
   const tab = ['dds', 'plan', 'debtors'].includes(params[0]) ? params[0] : 'dds';
-  const rep = await cached(`rep:${org}:${tab}`, 60e3, () => api.report(org, tab));
+  let rep;
+  try {
+    rep = await cached(`rep:${org}:${tab}`, 60e3, () => api.report(org, tab));
+  } catch (e) {
+    if (isLater(e) && tab === 'debtors') later.add('debtors');
+    throw e;
+  }
+  if (tab === 'debtors') later.delete('debtors');
   const body = tab === 'dds' ? ddsReport(rep) : tab === 'plan' ? planFact(rep) : debtorsReport(rep);
   return {
     key: 'reports', tab: 'reports', depth: 1, nav: true, title: 'Отчёты',
@@ -1710,9 +1753,16 @@ actions['push-test'] = () => {
   setTimeout(() => demoNotification('r101', `2${NB}300${NB}000${NB}₸`), 3000);
 };
 
+// Профиль не зависит от настроек: имя, телефон и выход есть всегда. Пользователь — из GET /me
+// (не ответил — из сессии). Настройки (501 — этап 2) и список организаций — по возможности.
 views.profile = async () => {
-  const [orgsData, st] = await Promise.all([api.orgs(), api.settings()]);
-  const u = (api.session() && api.session().user) || (await api.me()) || {};
+  const [orgsR, stR, meR] = await Promise.allSettled([api.orgs(), api.settings(), api.me()]);
+  const end = [orgsR, stR, meR].find((r) => r.status === 'rejected' && isSessionEnd(r.reason));
+  if (end) throw end.reason; // сессия закрыта — на вход
+  const orgsData = orgsR.status === 'fulfilled' ? orgsR.value : null;
+  const st = stR.status === 'fulfilled' ? stR.value : null;
+  const stLater = !st && isLater(stR.reason);
+  const u = (meR.status === 'fulfilled' && meR.value) || (api.session() && api.session().user) || {};
   const cur = api.orgId();
   return {
     key: 'profile', tab: 'profile', depth: 1, nav: true, title: 'Профиль',
@@ -1723,19 +1773,20 @@ views.profile = async () => {
         <div><b>${H(u.name || '')}</b><span>${H(u.role || '')}</span><span class="muted">${H(u.phone || '')}</span></div>
       </section>
 
-      <div class="list-label">Организации</div>
+      ${orgsData ? `<div class="list-label">Организации</div>
       <section class="card list">
         ${(orgsData.items || []).map((o) => `<button class="li" data-act="switch-org" data-id="${H(o.id)}">
           ${ava(o)}
           <span class="li-main"><b>${H(o.name)}</b><small>${H([o.city, o.activity].filter(Boolean).join(' · '))}</small></span>
           ${o.id === cur ? `<span class="li-check">${I.check}</span>` : '<span class="li-radio"></span>'}
         </button>`).join('')}
-      </section>
+      </section>` : ''}
 
       <div class="list-label">Уведомления</div>
-      <section class="card list">
+      <section class="card list" data-settings="${st ? 'on' : stLater ? 'later' : 'error'}">
         ${pushRow()}
-        ${TOGGLES.map((t) => toggleRow(t, st)).join('')}
+        ${st ? TOGGLES.map((t) => toggleRow(t, st)).join('') : ''}
+        ${!st && !stLater ? `<div class="li li-note-row"><span class="li-main"><small>Настройки уведомлений не загрузились — откройте профиль позже</small></span></div>` : ''}
       </section>
 
       <div class="list-label">${isDemo() ? 'Демо' : 'Вход'}</div>

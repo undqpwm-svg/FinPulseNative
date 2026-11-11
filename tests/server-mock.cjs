@@ -791,6 +791,69 @@ const PUSH_STUB = () => {
       ok(shown[1] && shown[1].o.data.hash === '#/notifications', 'неизвестный type → список уведомлений');
     }
 
+    // ---------- 6б. этап 2: 501 not_implemented ----------
+    console.log('\n▶ Этап 2: 501 not_implemented (календарь, отчёты, настройки)');
+    {
+      const { ctx, page, errors, ctl } = await newCtx();
+      const STAGE2 = /^\/orgs\/[^/]+\/(calendar|reports\/)|^\/me\/settings$/;
+      ctl.override = (call, { err }) => (STAGE2.test(call.path) ? (err(501, 'not_implemented', 'Раздел будет на этапе 2'), true) : false);
+      await page.goto(BASE);
+      await settle(page, 800);
+      await login(page, ctl);
+      ok(norm(await page.locator('.hero').innerText()).includes('5 000 000'), 'главная грузится (сводка), хотя календарь и отчёты — 501');
+      ok(await page.locator('.wk-col').count() === 7, '«Ближайшие 7 дней» — из сводки');
+      const later = async (what) => {
+        const txt = norm(await page.locator('.screen:not(.leaving) .scroll').innerText());
+        ok(txt.includes('Раздел появится в следующей версии'), `${what}: заглушка «Раздел появится в следующей версии»`);
+        ok(!txt.includes('SmartSol') && (await page.locator('.screen:not(.leaving) [data-act="retry"]').count()) === 0 && (await page.locator('.screen:not(.leaving) .err-state').count()) === 0, `${what}: без «напишите в SmartSol», без «Обновить», не ошибка`);
+      };
+      for (const [hash, what, tabbar] of [['#/calendar', 'календарь', true], ['#/calendar/2026-11-12', 'день календаря', false], ['#/reports', 'отчёт ДДС', true], ['#/reports/plan', 'план-факт', true], ['#/reports/debtors', 'должники', true]]) {
+        await page.evaluate((h) => { location.hash = h; }, hash);
+        await settle(page, 800);
+        await later(what);
+        if (tabbar) ok(await page.locator('.tabbar').isVisible(), `${what}: нижняя навигация на месте`);
+      }
+      await shot(page, '09-razdel-v-sleduyushchey-versii');
+      const stage2 = ctl.calls.filter((c) => STAGE2.test(c.path));
+      ok(stage2.some((c) => c.path.endsWith('/calendar')) && ['cash-flow', 'plan-fact', 'debtors'].every((r) => stage2.some((c) => c.path.endsWith(`/reports/${r}`))), 'все методы этапа 2 вызывались и получили 501');
+      await page.evaluate(() => { location.hash = '#/home'; });
+      await settle(page, 800);
+      ok((await page.locator('.screen:not(.leaving) [data-go^="#/calendar"]').count()) === 0, 'после 501 календаря главная не ведёт в календарь («Календарь >», дни, плашка)');
+      ok(await page.locator('.screen:not(.leaving) .card-head:has-text("Ближайшие 7 дней") .link-btn').count() === 0, '«Календарь >» скрыт');
+      ok((await page.locator('.screen:not(.leaving) [data-go="#/reports/debtors"]').count()) === 0, 'после 501 отчёта «Нам должны» не ведёт в должников');
+      ok(norm(await page.locator('.screen:not(.leaving) .rec-card').innerText()).includes('Долг по возрасту'), 'дебиторка по возрасту — из сводки');
+      await shot(page, '10-glavnaya-bez-kalendarya');
+      // профиль: без /me/settings
+      await page.evaluate(() => { location.hash = '#/profile'; });
+      await settle(page, 900);
+      const prof = norm(await page.locator('.screen:not(.leaving) .scroll').innerText());
+      ok(ctl.calls.some((c) => c.path === '/me' && c.method === 'GET'), 'профиль: GET /me');
+      ok(prof.includes('Тест Руководитель') && prof.includes('+7 700 000 00 01'), 'профиль: имя и телефон из /me');
+      ok((await page.locator('[data-act="logout"]').isVisible()) && (await page.locator('[data-act="logout-all"]').isVisible()), 'профиль: «Выйти» и «Выйти со всех устройств» есть');
+      ok((await page.locator('[data-act="toggle"], .li-locked').count()) === 0 && (await page.locator('[data-settings="later"]').count()) === 1, 'профиль: переключатели уведомлений при 501 скрыты');
+      ok((await page.locator('.screen:not(.leaving) .err-state').count()) === 0 && !prof.includes('Раздел появится'), 'профиль — не ошибка и не заглушка');
+      await shot(page, '11-profil-bez-nastroek');
+      await page.locator('[data-act="logout"]').click();
+      await settle(page, 900);
+      ok((await page.evaluate(() => location.hash)) === '#/login' && ctl.calls.some((c) => c.path === '/auth/logout'), 'из профиля можно выйти');
+      noErrors(errors);
+      await ctx.close();
+    }
+
+    console.log('\n▶ Профиль: /me/settings недоступны по другой причине');
+    {
+      const { ctx, page, errors, ctl } = await newCtx();
+      ctl.override = (call, { err }) => (call.path === '/me/settings' ? (err(503, 'source_unavailable', 'Нет связи с учётом компании'), true) : false);
+      await page.goto(BASE);
+      await settle(page, 800);
+      await login(page, ctl);
+      await page.evaluate(() => { location.hash = '#/profile'; });
+      await settle(page, 900);
+      ok((await page.locator('[data-act="logout"]').isVisible()) && (await page.locator('[data-settings="error"]').count()) === 1, '503 настроек — профиль и выход на месте, строка «не загрузились»');
+      noErrors(errors);
+      await ctx.close();
+    }
+
     // ---------- 7. демо не ходит в сеть ----------
     console.log('\n▶ Демо не обращается к API');
     {

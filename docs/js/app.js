@@ -1,8 +1,9 @@
-// Точка входа: роутер на хешах, переходы между экранами, нижняя навигация
-import * as S from './store.js';
-import { views, actions } from './views.js';
-import { nav, navigate, back, closeSheet, sheetOpen, histIdx } from './ui.js';
-import { I } from './icons.js';
+// Точка входа: роутер на хешах, асинхронная загрузка экранов, ошибки без белого экрана, переходы, нижняя навигация.
+import { CONFIG } from './config.js';
+import { api, setMode, ApiError } from './api/index.js';
+import { views, actions, errorView, onUnauthorized, invalidate } from './screens.js';
+import { nav, navigate, back, closeSheet, sheetOpen, histIdx, loading } from './ui.js';
+import { I, logoMark } from './icons.js';
 
 const app = document.getElementById('app');
 const screens = app.querySelector('.screens');
@@ -16,39 +17,117 @@ const TABS = [
   { id: 'reports', hash: '#/reports', label: 'Отчёты', icon: I.chart },
   { id: 'profile', hash: '#/profile', label: 'Профиль', icon: I.user },
 ];
+const TAB_TITLES = { home: 'Главная', calendar: 'Календарь', requests: 'Заявки', reports: 'Отчёты', profile: 'Профиль' };
+const DETAIL_META = { notifications: ['Уведомления', '#/home'], orgs: ['Организации', '#/home'], requests: ['Заявка', '#/requests'] };
 
 let current = null; // { key, el, depth, tab }
 let lastHash = null;
+let seq = 0; // номер последней навигации: устаревшие ответы не рисуем
 const DUR = 340;
 
 function parse() {
-  const h = location.hash.replace(/^#\/?/, '').split('?')[0];
-  const parts = h.split('/').filter(Boolean).map(decodeURIComponent);
-  return { name: parts[0] || '', params: parts.slice(1) };
+  const [h, q = ''] = location.hash.replace(/^#\/?/, '').split('?');
+  const parts = h.split('/').filter(Boolean).map((p) => {
+    try {
+      return decodeURIComponent(p);
+    } catch (e) {
+      return p;
+    }
+  });
+  return { name: parts[0] || '', params: parts.slice(1), query: new URLSearchParams(q) };
 }
 
 function guard(r) {
-  const st = S.state;
-  if (!st.auth.logged) return ['login', 'code'].includes(r.name) ? null : '#/login';
-  if (!st.orgId) return r.name === 'orgs' ? null : '#/orgs';
+  if (!api.session()) return ['login', 'code'].includes(r.name) ? null : '#/login';
+  if (!api.orgId()) return r.name === 'orgs' ? null : '#/orgs';
   if (!r.name || r.name === 'login' || r.name === 'code' || !views[r.name]) return '#/home';
   return null;
 }
 
-function route() {
-  const r = parse();
+const replaceHash = (hash) => history.replaceState({ idx: histIdx() }, '', hash);
+
+// Метаданные экрана для ошибки: вкладка — с заголовком раздела и нижней навигацией, остальное — с «Назад».
+function errorMeta(r) {
+  if (TAB_TITLES[r.name] && !(r.name === 'requests' && r.params[0])) {
+    return { key: `error:${r.name}`, tab: r.name, title: TAB_TITLES[r.name] };
+  }
+  const [title, back_] = DETAIL_META[r.name] || ['ФинПульс', '#/home'];
+  return { key: `error:${r.name}:${r.params.join('/')}`, title, back: back_, depth: 2 };
+}
+
+const splash = () => ({
+  key: 'splash', depth: 0, title: 'ФинПульс',
+  html: `<div class="splash">${logoMark(56)}<span class="spin dark" aria-hidden="true"></span><span class="splash-text">Загружаем данные…</span></div>`,
+});
+
+async function route() {
+  let r = parse();
+  // #/demo — включить демо для показов (ссылка «Посмотреть демо», QR на презентации).
+  if (r.name === 'demo') {
+    setMode('demo');
+    invalidate();
+  }
+  try {
+    await api.init(); // демо: загрузка data/demo.json; сервер — ничего
+  } catch (e) {
+    console.error(e);
+    lastHash = location.hash;
+    show(errorView(e, { key: 'error:init', title: 'ФинПульс', back: '#/login', depth: 0 }), current ? 'fade' : 'none');
+    return;
+  }
+  if (r.name === 'demo') {
+    replaceHash(api.session() ? '#/home' : '#/login');
+    r = parse();
+  }
+  // ?org=… — из push: открыть заявку нужной организации.
+  const qOrg = r.query.get('org');
+  if (qOrg && api.session()) {
+    if (api.orgId() !== qOrg) {
+      api.setOrgId(qOrg);
+      invalidate();
+      nav.badge = null;
+    }
+    replaceHash(location.hash.split('?')[0]);
+  }
   const redirect = guard(r);
   if (redirect) {
-    history.replaceState({ idx: histIdx() }, '', redirect);
+    replaceHash(redirect);
     return route();
   }
   lastHash = location.hash;
+  const my = ++seq;
   if (sheetOpen()) closeSheet(true);
   app.querySelectorAll('.done-overlay').forEach((e) => e.remove());
-  const v = views[r.name](r.params);
   let dir = nav.pendingDir;
   nav.pendingDir = null;
-  if (!current) dir = 'none';
+
+  const timer = setTimeout(() => {
+    if (my !== seq) return;
+    if (!current) show(splash(), 'none');
+    else loading(true);
+  }, CONFIG.loadingDelayMs);
+  let v;
+  try {
+    v = await views[r.name](r.params);
+  } catch (e) {
+    if (e instanceof ApiError && e.code === 'unauthorized') {
+      clearTimeout(timer);
+      loading(false);
+      if (my === seq) onUnauthorized();
+      return;
+    }
+    if (!(e instanceof ApiError)) console.error(e); // ожидаемые ошибки API показываем на экране, не в консоли
+    v = errorView(e, errorMeta(r));
+  } finally {
+    clearTimeout(timer);
+    if (my === seq) loading(false);
+  }
+  if (my !== seq) return; // пока грузили, пользователь ушёл на другой экран
+  if (v.redirect) {
+    replaceHash(v.redirect);
+    return route();
+  }
+  if (!current || current.key === 'splash') dir = current ? 'fade' : 'none';
   else if (current.key === v.key) dir = 'same';
   else if (!dir || dir === 'same') {
     if (current.tab && v.tab) dir = 'fade';
@@ -59,13 +138,8 @@ function route() {
   show(v, dir);
 }
 
-function rerender() {
-  const r = parse();
-  if (guard(r)) return route();
-  show(views[r.name](r.params), 'same');
-}
-nav.rerender = rerender;
 nav.route = route;
+nav.rerender = route; // тот же экран — перерисовка на месте, без анимации перехода
 // назад/вперёд в браузере и ручная правка адреса
 const onHistory = () => {
   if (location.hash !== lastHash) route();
@@ -113,12 +187,11 @@ function show(v, dir) {
   old.classList.add('leaving', outC);
   el.classList.add(inC);
   if (dir === 'pop') old.style.zIndex = 3;
-  const done = () => {
+  const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  setTimeout(() => {
     old.remove();
     el.classList.remove(inC);
-  };
-  const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  setTimeout(done, reduced ? 0 : DUR + 30);
+  }, reduced ? 0 : DUR + 30);
 }
 
 function chrome(v) {
@@ -132,7 +205,7 @@ function chrome(v) {
 }
 
 function renderTabbar(active) {
-  const pend = S.state.orgId ? S.pending().length : 0;
+  const pend = nav.badge || 0;
   tabbar.innerHTML = TABS.map((t) => `<button class="tab ${t.id === active ? 'on' : ''}" data-go="${t.hash}" aria-label="${t.label}" ${t.id === active ? 'aria-current="page"' : ''}>
       <span class="tab-ic">${t.icon}${t.id === 'requests' && pend ? `<span class="tab-badge">${pend}</span>` : ''}</span>
       <span class="tab-label">${t.label}</span>
@@ -160,19 +233,28 @@ app.addEventListener('click', (e) => {
     const fn = actions[t.dataset.act];
     if (fn) {
       e.preventDefault();
-      fn(t, e);
+      Promise.resolve()
+        .then(() => fn(t, e))
+        .catch((err) => console.error(err));
     }
   }
 });
 
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && sheetOpen()) closeSheet();
+  if (e.key === 'Escape' && sheetOpen()) actions['sheet-close']();
 });
+
+// Нажатие на push, когда приложение уже открыто: service worker присылает адрес экрана.
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.addEventListener('message', (e) => {
+    const d = e.data || {};
+    if (d.type === 'open' && typeof d.hash === 'string' && d.hash.startsWith('#/')) navigate(d.hash, 'push');
+  });
+}
 
 // ---------- рамка телефона на компьютере ----------
 function fitDevice() {
-  const stage = document.querySelector('.stage');
-  if (!stage) return;
+  if (!document.querySelector('.stage')) return;
   const framed = window.matchMedia('(min-width: 700px) and (min-height: 560px)').matches;
   document.documentElement.classList.toggle('framed', framed);
   const scale = framed ? Math.min(1, (window.innerHeight - 48) / 868) : 1;
@@ -193,21 +275,10 @@ tick();
 setInterval(tick, 20000);
 
 // ---------- запуск ----------
-async function boot() {
-  try {
-    await S.init();
-  } catch (err) {
-    screens.innerHTML = `<section class="screen"><div class="scroll"><div class="empty"><span class="empty-ic">${I.alert}</span><b>Не удалось загрузить демо</b><span>Проверьте интернет и обновите страницу</span><button class="btn btn-secondary" onclick="location.reload()">Обновить</button></div></div></section>`;
-    console.error(err);
-    return;
-  }
-  window.addEventListener('popstate', onHistory);
-  window.addEventListener('hashchange', onHistory);
-  if (!history.state) history.replaceState({ idx: 0 }, '', location.hash || '#/');
-  route();
-  document.documentElement.classList.add('ready');
-}
-boot();
+window.addEventListener('popstate', onHistory);
+window.addEventListener('hashchange', onHistory);
+if (!history.state) history.replaceState({ idx: 0 }, '', location.hash || '#/');
+route().finally(() => document.documentElement.classList.add('ready'));
 
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
   window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(() => {}));

@@ -7,6 +7,9 @@
   <meta name="description" content="ФинПульс — деньги компании в телефоне руководителя. Демо-макет, данные выдуманы.">
   <meta name="theme-color" content="#F4F1EA">
   <meta name="color-scheme" content="light">
+  <!-- Скрипты только свои; сеть — только к API сервера-посредника (адрес как в js/config.js) и шрифтам Google -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; connect-src 'self' https://api.smartsol.pro; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; frame-src blob:; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'">
+  <meta name="referrer" content="no-referrer">
   <meta name="format-detection" content="telephone=no">
 
   <!-- PWA: установка на экран «Домой» -->
@@ -23,8 +26,8 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geologica:wght@400;500;600;700&family=Onest:wght@400;500;600;700&display=swap">
   <link rel="stylesheet" href="css/app.css">
-  <link rel="modulepreload" href="js/views.js">
-  <link rel="modulepreload" href="js/store.js">
+  <link rel="modulepreload" href="js/screens.js">
+  <link rel="modulepreload" href="js/api/index.js">
 </head>
 <body>
   <!-- На компьютере: макет по центру в рамке телефона и подпись для презентации -->

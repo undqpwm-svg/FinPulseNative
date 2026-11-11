@@ -8,6 +8,7 @@ export const nav = {
   pendingDir: null,
   route: () => {},
   rerender: () => {},
+  badge: null, // число заявок на согласовании для вкладки (известно из последнего ответа сервера)
 };
 
 // Номер записи в истории внутри приложения: «Назад» никогда не уводит со страницы
@@ -71,9 +72,33 @@ export function closeSheet(instant = false) {
 
 export const sheetOpen = () => !!sheetEl;
 
+// Заменить содержимое открытой шторки (состояния решения: ошибка, конфликт, «повторить»).
+export function setSheet(html) {
+  const body = sheetEl && sheetEl.querySelector('.sheet-body');
+  if (!body) return;
+  sheetEl.classList.remove('busy');
+  body.innerHTML = html;
+  body.classList.remove('swap');
+  void body.offsetWidth;
+  body.classList.add('swap');
+}
+
+// ---------- индикатор загрузки (тонкая полоса сверху) ----------
+export function loading(on) {
+  let bar = root().querySelector('.loadbar');
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.className = 'loadbar';
+    bar.setAttribute('aria-hidden', 'true');
+    root().appendChild(bar);
+  }
+  bar.classList.toggle('on', !!on);
+  root().setAttribute('aria-busy', on ? 'true' : 'false');
+}
+
 // ---------- тост ----------
 let toastTimer = null;
-export function toast(text) {
+export function toast(text, kind = 'ok') {
   let el = root().querySelector('.toast');
   if (!el) {
     el = document.createElement('div');
@@ -81,12 +106,12 @@ export function toast(text) {
     el.setAttribute('role', 'status');
     root().appendChild(el);
   }
-  el.innerHTML = `${I.check}<span>${text}</span>`;
-  el.classList.remove('show');
+  el.innerHTML = `${kind === 'error' ? I.alert : kind === 'info' ? I.info : I.check}<span>${text}</span>`;
+  el.className = `toast toast-${kind}`;
   void el.offsetWidth;
   el.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.remove('show'), 2400);
+  toastTimer = setTimeout(() => el.classList.remove('show'), kind === 'error' ? 4200 : 2600);
 }
 
 // ---------- экран результата (согласовано / отклонено) ----------

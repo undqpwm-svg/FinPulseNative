@@ -103,6 +103,10 @@ async function runFlow(browser, name, opts, isPhone) {
   ok(await page.locator('[data-submit]').isDisabled(), 'кнопка «Получить код» неактивна без номера');
   await noHScroll(page, 'Вход');
   if (isPhone) await shot(page, '01-vhod');
+  ok(await page.locator('[data-act="mode-demo"]').isVisible(), 'по умолчанию — настоящий вход, есть «Посмотреть демо»');
+  await page.locator('[data-act="mode-demo"]').click();
+  await settle(page, 700);
+  ok((await page.locator('.login-hint').innerText().then(norm)).includes('Демо'), 'включён демо-режим');
   await page.locator('#phone').fill('7015551234');
   ok(await page.locator('#phone').inputValue() === '701 555 12 34', 'маска номера телефона');
   await page.locator('[data-submit]').click();
@@ -341,7 +345,7 @@ async function runFlow(browser, name, opts, isPhone) {
   await settle(page);
   await tap(page, '[data-act="logout"]');
   await settle(page);
-  ok((await screenKey(page)) === '#/login', '«Выйти» возвращает на вход');
+  ok((await screenKey(page)) === '#/login' && (await page.locator('[data-act="mode-demo"]').count()) === 1, '«Выйти из демо» возвращает к настоящему входу');
 
   // без localStorage (приватный режим) — не падает
   await ctx.addInitScript(() => {

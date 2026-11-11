@@ -5,8 +5,9 @@ import { CONFIG } from '../config.js';
 import { ApiError, storage, e164 } from './core.js';
 
 // ---------- сессия ----------
-// access-токен (15 мин) — только в памяти; refresh-токен (30 дней, одноразовый) — в хранилище браузера (контракт, 2).
-// Профиль пользователя хранится рядом, чтобы показать имя до первого запроса.
+// access-токен (15 мин) — только в памяти. refresh-токен — в cookie HttpOnly fp_refresh: приложение его не видит и
+// не хранит, браузер отправляет его сам в запросы /auth/* с credentials: 'include' (контракт, 2.6).
+// В хранилище браузера — только признак входа и профиль (имя для экрана), без токенов.
 const SESSION_KEY = 'finpuls-session';
 const ORG_KEY = 'finpuls-org-server';
 const DEVICE_KEY = 'finpuls-device';
@@ -14,20 +15,20 @@ const DEVICE_KEY = 'finpuls-device';
 let access = null; // { token, expiresAt }
 let refreshing = null; // одно обновление на все запросы сразу (контракт, 2.3)
 let versionInfo = null; // ответ GET /version
-let orgsCache = null; // имена организаций для главной и счетов (сводка возвращает только org_id)
+let orgsCache = null; // названия организаций для счетов и сводки (сводка отдаёт и своё название)
 const notEditable = new Set(); // переключатели настроек с editable: false
 
 function stored() {
   const s = storage.getJSON(SESSION_KEY);
-  return s && s.refreshToken ? s : null;
+  return s && s.loggedIn && (!s.until || s.until > Date.now()) ? s : null;
 }
 
 function saveTokens(r, user) {
   const prev = stored() || {};
   access = { token: r.access_token, expiresAt: Date.now() + (Number(r.access_expires_in) || 900) * 1000 };
   storage.setJSON(SESSION_KEY, {
-    refreshToken: r.refresh_token,
-    refreshExpiresAt: Date.now() + (Number(r.refresh_expires_in) || 2592000) * 1000,
+    loggedIn: true,
+    until: Date.now() + (Number(r.refresh_expires_in) || 2592000) * 1000, // срок cookie; продлевается обновлением
     user: user || prev.user || null,
   });
 }
@@ -66,7 +67,8 @@ function codeByStatus(status) {
 
 const appHeaders = () => ({ 'X-App-Version': CONFIG.appVersion, 'X-App-Platform': 'web' });
 
-async function send(method, path, { body, token, headers = {} } = {}) {
+// Запросы /auth/* — с cookie refresh-токена (credentials: 'include'), остальные — без cookie, с Bearer.
+async function send(method, path, { body, token, headers = {}, cookie = path.startsWith('/auth/') } = {}) {
   const h = { Accept: 'application/json', ...appHeaders(), ...headers };
   if (body !== undefined) h['Content-Type'] = 'application/json; charset=utf-8';
   if (token) h.Authorization = `Bearer ${token}`;
@@ -79,7 +81,7 @@ async function send(method, path, { body, token, headers = {} } = {}) {
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: ctrl.signal,
       cache: 'no-store',
-      credentials: 'omit',
+      credentials: cookie ? 'include' : 'omit',
       mode: 'cors',
       referrerPolicy: 'no-referrer',
     });
@@ -110,9 +112,8 @@ async function toError(res) {
 function refreshTokens() {
   if (refreshing) return refreshing;
   refreshing = (async () => {
-    const s = stored();
-    if (!s) throw new ApiError('unauthorized');
-    const res = await send('POST', '/auth/refresh', { body: { refresh_token: s.refreshToken } });
+    if (!stored()) throw new ApiError('unauthorized');
+    const res = await send('POST', '/auth/refresh'); // без тела и без Authorization: токен — в cookie
     if (!res.ok) {
       const e = await toError(res);
       if (e.code === 'unauthorized' || e.code === 'access_revoked') clearSession();
@@ -209,28 +210,28 @@ export async function verifyCode({ requestId, code }) {
   const res = await send('POST', '/auth/token', { body: { challenge_id: requestId, code } });
   if (!res.ok) throw await toError(res);
   const r = await res.json();
-  if (!r.access_token || !r.refresh_token) throw new ApiError('server_error', 'Сервер не выдал сессию');
+  if (!r.access_token) throw new ApiError('server_error', 'Сервер не выдал сессию');
   orgsCache = null;
   saveTokens(r, r.user);
   return session_();
 }
 
+// Выход (2.4): без Authorization и без тела, по cookie; сервер удаляет cookie. Ответ всегда 204.
 export async function logout() {
-  const s = stored();
   try {
-    if (s) await authed('POST', '/auth/logout', { body: { refresh_token: s.refreshToken } });
+    await send('POST', '/auth/logout');
   } catch (e) {
     /* выходим в любом случае */
   }
   clearSession();
 }
 
-// «Выйти со всех устройств» (контракт, 2.5). В интерфейсе пункта пока нет.
+// «Выйти со всех устройств» (2.5): по cookie. refresh_invalid — пользователя не определить, просто на вход.
 export async function logoutAll() {
-  try {
-    await authed('POST', '/auth/logout-all', { body: {} });
-  } catch (e) {
-    if (e.code !== 'unauthorized' && e.code !== 'access_revoked') throw e; // нет связи — остаёмся, пусть повторит
+  const res = await send('POST', '/auth/logout-all'); // нет связи — исключение, сессия остаётся, пусть повторит
+  if (!res.ok) {
+    const e = await toError(res);
+    if (e.code !== 'unauthorized' && e.code !== 'access_revoked') throw e;
   }
   clearSession();
 }
@@ -281,20 +282,11 @@ function almatyToday() {
   return new Date(Date.now() + 5 * 3600e3).toISOString().slice(0, 10);
 }
 
-// ---------- главная (5.1) ----------
-// В сводке нет порога: восстанавливаем его по разрыву (shortage = threshold − closing). Нет разрыва — красных дней нет.
-function thresholdFrom(s) {
-  if (!s.gap) return Number.NEGATIVE_INFINITY;
-  const day = [...(s.forecast || []), ...((s.week && s.week.days) || [])].find((d) => d.date === s.gap.date);
-  return day ? day.closing + s.gap.shortage : 0;
-}
-
+// ---------- главная (5.1) — одним запросом ----------
 export async function home(id) {
-  const [s, org, unread] = await Promise.all([
-    getJSON(orgPath(id, '/summary')),
-    orgInfo(id),
-    getJSON(`/notifications?${qs({ org_id: id, unread_only: true, limit: 1 })}`).then((r) => r.unread_count || 0).catch(() => 0),
-  ]);
+  const s = await getJSON(orgPath(id, '/summary'));
+  const known = orgsCache && orgsCache.find((o) => o.id === id);
+  const org = { id, name: s.org_name || '', short: s.org_short_name || s.org_name || '', initials: known ? known.initials : initialsOf(s.org_short_name || s.org_name) };
   const rec = s.receivables || { total: 0, aging: {} };
   const st = stored();
   return {
@@ -304,15 +296,21 @@ export async function home(id) {
     user: userDto(st && st.user),
     org,
     money: { total: s.money.total, bank: s.money.bank, cash: s.money.cash },
-    threshold: thresholdFrom(s),
+    threshold: s.threshold || 0,
     forecast: { start: s.money.total, days: (s.forecast || []).map((d) => ({ date: d.date, end: d.closing })) },
     gap: s.gap ? { date: s.gap.date, deficit: s.gap.shortage, outflow: s.gap.outflow, articles: s.gap.top_articles || [] } : null,
     minBalance: s.min_day ? { date: s.min_day.date, amount: s.min_day.closing } : null,
     approvals: { count: s.pending.count, sum: s.pending.amount, overLimit: s.pending.over_limit_count },
     week: ((s.week && s.week.days) || []).map((d) => ({ date: d.date, in: d.inflow, out: d.outflow, end: d.closing })),
     receivables: { total: rec.total, aging: agingDto(rec.aging), oldest: null }, // самого старого должника в сводке нет
-    unread,
+    unread: s.unread_count || 0,
   };
+}
+
+// Инициалы для аватара, если списка организаций ещё нет: «Альфа Логистик» → «АЛ».
+function initialsOf(name) {
+  const w = String(name || '').replace(/^(ТОО|АО|ИП|КХ)\s+/, '').replace(/[^A-Za-zА-Яа-яЁёӘәҒғҚқҢңӨөҰұҮүҺһІі\s-]/g, ' ').split(/\s+/).filter(Boolean);
+  return (w.length > 1 ? w[0][0] + w[1][0] : (w[0] || '?').slice(0, 2)).toUpperCase();
 }
 
 const agingDto = (a) => ({ days_0_30: (a && a.days_0_30) || 0, days_31_60: (a && a.days_31_60) || 0, days_over_60: (a && a.days_over_60) || 0 });
@@ -351,8 +349,8 @@ export async function calendar(id) {
         who: i.counterparty || 'Без контрагента',
         article: i.article || '',
         note: [i.note, i.late ? 'дата прошла' : null, i.preliminary ? 'дата предварительная' : null,
-          i.currency && i.currency !== 'KZT' ? `сумма в ${i.currency}` : null].filter(Boolean).join(' · '),
-        amount: i.amount,
+          i.currency && i.currency !== 'KZT' ? `${fmt(i.amount)} ${i.currency}` : null].filter(Boolean).join(' · '),
+        amount: i.amount_kzt != null ? i.amount_kzt : i.amount, // в тенге, как дневные итоги
         requestId: i.request_id || null,
       })),
     })),
@@ -473,20 +471,9 @@ export async function decide(id, reqId, { decision, comment, idempotencyKey }) {
       headers: { 'Idempotency-Key': idempotencyKey },
     });
   } catch (e) {
-    // «Уже решено»: в ошибке нет кто и когда — перечитываем карточку (контракт: «Перечитайте карточку»).
+    // «Уже решено»: кто и когда — в details (6.4).
     if (e.code === 'already_decided') {
-      try {
-        const card = await getCard(id, reqId);
-        const last = [...(card.route || [])].reverse().find((s) => s.kind === 'approval' && s.state === 'done' && s.decision);
-        e.details = {
-          ...e.details,
-          status: { approved: 'approved', rejected: 'rejected', returned: 'returned' }[last && last.decision] || (card.status === 'rejected' ? 'rejected' : 'approved'),
-          by: last && last.approver ? last.approver.name : '',
-          at: last ? last.at : null,
-        };
-      } catch (e2) {
-        /* без подробностей */
-      }
+      e.details = { ...e.details, status: e.details.decision || 'approved', by: e.details.decided_by || '', at: e.details.decided_at || null };
     }
     throw e;
   }
@@ -554,15 +541,15 @@ export async function notifications(id) {
   };
 }
 
-export const markRead = (id, nId) => authed('POST', '/notifications/read', { body: { ids: [nId] } });
+export const markRead = (id, nId) => authed('POST', '/notifications/read', { body: { ids: [nId], org_id: id } });
 export const markAllRead = (id) => authed('POST', '/notifications/read', { body: { all: true, org_id: id } });
 
 // Утренняя сводка — те же данные главной (link.kind = summary).
 export async function summary(id) {
-  const [s, org] = await Promise.all([getJSON(orgPath(id, '/summary')), orgInfo(id)]);
+  const s = await getJSON(orgPath(id, '/summary'));
   return {
     asOf: s.updated_at,
-    orgName: org.name,
+    orgName: s.org_name || '',
     money: s.money,
     today: { in: s.today.inflow, out: s.today.outflow },
     gap: s.gap ? { date: s.gap.date, deficit: s.gap.shortage } : null,

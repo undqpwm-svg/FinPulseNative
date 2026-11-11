@@ -4,6 +4,8 @@
 // source_unavailable с повтором того же кода, access_revoked); выбор организации (несколько / одна); обновление токенов
 // (одно на все запросы, refresh_invalid, access_revoked); «1С недоступна»; решения (успех, already_decided,
 // not_awaiting_you, action_failed, обрыв связи и повтор с тем же Idempotency-Key); настройки; уведомления; push.
+// Версия контракта: refresh-токен — в cookie HttpOnly fp_refresh (2.6), CORS с credentials, сводка главной одним
+// запросом (org_name, unread_count, threshold), already_decided с decided_by/decided_at, amount_kzt в календаре.
 // Запуск: node tests/server-mock.cjs [--shots]
 const { chromium, devices } = require('playwright');
 const http = require('http');
@@ -60,7 +62,7 @@ function calDays() {
     const opening = 5000000 - i * 10000;
     return {
       date: day(i), opening, inflow: i % 3 ? 300000 : 0, outflow: 310000, closing: opening - 10000 - (i % 3 ? 0 : 300000) + (i % 3 ? 0 : 300000), gap: false,
-      items: [{ direction: 'out', counterparty: 'ТОО «Тест Поставщик»', article: 'Аренда', note: null, amount: 310000, currency: 'KZT', source: 'planned_payment', request_id: null, late: false, preliminary: false }],
+      items: [{ direction: 'out', counterparty: 'ТОО «Тест Поставщик»', article: 'Аренда', note: null, amount: i === 0 ? 600 : 310000, currency: i === 0 ? 'USD' : 'KZT', amount_kzt: 310000, source: 'planned_payment', request_id: null, late: false, preliminary: false }],
     };
   });
 }
@@ -92,7 +94,8 @@ const listItem = (c) => ({ id: c.id, number: c.number, status: c.status, my_acti
 function summary() {
   const d = calDays();
   return {
-    org_id: 'org_test', date: TODAY, updated_at: T(TODAY, '10:15'),
+    org_id: 'org_test', org_name: 'ТОО «Тест»', org_short_name: 'Тест', date: TODAY, updated_at: T(TODAY, '10:15'),
+    unread_count: 2, threshold: 4950000,
     money: { bank: 4800000, cash: 200000, total: 5000000 }, today: { inflow: 0, outflow: 310000 },
     forecast: d.slice(0, 14).map((x) => ({ date: x.date, closing: x.closing })),
     gap: null, min_day: { date: day(27), closing: d[27].closing },
@@ -105,7 +108,7 @@ function summary() {
 // ---------- поддельный сервер ----------
 async function mockApi(page, ctl) {
   ctl.calls = [];
-  ctl.state = { refresh: 'rt_1', access: 'at_1', decided: false, orgs: [ORG], settings: { requests: true, summary: true, payments: true, gaps: true, whatsapp: false }, ...ctl.state };
+  ctl.state = { cookie: false, access: 'at_1', decided: false, orgs: [ORG], settings: { requests: true, summary: true, payments: true, gaps: true, whatsapp: false }, ...ctl.state };
   await page.route(`${API}/**`, async (route) => {
     const req = route.request();
     const url = new URL(req.url());
@@ -118,7 +121,15 @@ async function mockApi(page, ctl) {
     }
     const call = { method: req.method(), path: p, query: Object.fromEntries(url.searchParams), body, headers: req.headers() };
     ctl.calls.push(call);
-    const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Expose-Headers': 'Idempotent-Replayed, Retry-After, Content-Disposition' };
+    // CORS по контракту: точный origin, credentials, заголовки, которые приложение может читать
+    const cors = {
+      'Access-Control-Allow-Origin': req.headers().origin || '*',
+      'Access-Control-Allow-Credentials': 'true',
+      'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+      'Access-Control-Allow-Headers': 'Authorization, Idempotency-Key, X-App-Version, X-App-Platform, Content-Type',
+      'Access-Control-Expose-Headers': 'Idempotent-Replayed, Retry-After, Content-Disposition',
+    };
+    if (req.method() === 'OPTIONS') return route.fulfill({ status: 204, headers: cors });
     const json = (status, data, headers = {}) => route.fulfill({ status, contentType: 'application/json; charset=utf-8', headers: { ...cors, ...headers }, body: data === null ? '' : JSON.stringify(data) });
     const err = (status, error, message = '', details = undefined, headers = {}) => json(status, { error, message, ...(details ? { details } : {}) }, headers);
     const st = ctl.state;
@@ -140,21 +151,25 @@ async function mockApi(page, ctl) {
       if (code === '2222') return err(429, 'phone_blocked', 'Номер заблокирован на 15 минут', { retry_after: 900 });
       if (code === '3333' && !st.sourceBack) return err(503, 'source_unavailable', 'Учёт компании не отвечает', undefined, { 'Retry-After': '30' });
       if (code === '4444') return err(403, 'access_revoked', 'Доступ к приложению выключен администратором компании');
-      return json(200, { access_token: st.access, access_expires_in: 900, refresh_token: st.refresh, refresh_expires_in: 2592000, token_type: 'Bearer', user: USER });
+      st.cookie = true; // сервер выставил fp_refresh (HttpOnly) — в мок-сервере держим его состояние сами
+      return json(200, { access_token: st.access, access_expires_in: 900, refresh_expires_in: 2592000, token_type: 'Bearer', user: USER }, { 'Set-Cookie': 'fp_refresh=rt_x; HttpOnly; Secure; SameSite=Strict; Path=/api/v1/auth; Max-Age=2592000' });
     }
     if (p === '/auth/refresh') {
       if (st.revokeOnRefresh) return err(403, 'access_revoked', 'Администратор выключил вам доступ к приложению');
-      if (!body || body.refresh_token !== st.refresh) return err(401, 'refresh_invalid', 'Сессия закончилась');
+      if (!st.cookie || body || req.headers().authorization) return err(401, 'refresh_invalid', 'Сессия закончилась');
       st.refreshCount = (st.refreshCount || 0) + 1;
-      st.refresh = `rt_${st.refreshCount + 1}`;
       st.access = `at_${st.refreshCount + 1}`;
-      return json(200, { access_token: st.access, access_expires_in: 900, refresh_token: st.refresh, refresh_expires_in: 2592000, token_type: 'Bearer' });
+      return json(200, { access_token: st.access, access_expires_in: 900, refresh_expires_in: 2592000, token_type: 'Bearer' });
+    }
+    if (p === '/auth/logout' || p === '/auth/logout-all') {
+      if (p === '/auth/logout-all' && !st.cookie) return err(401, 'refresh_invalid', 'Сессия закончилась');
+      st.cookie = false;
+      return route.fulfill({ status: 204, headers: { ...cors, 'Set-Cookie': 'fp_refresh=; HttpOnly; Secure; SameSite=Strict; Path=/api/v1/auth; Max-Age=0' } });
     }
     // всё дальше — с авторизацией
     const auth = req.headers().authorization || '';
     if (st.expireAccess && auth === `Bearer ${st.expireAccess}`) return err(401, 'token_expired', 'Токен истёк');
     if (auth !== `Bearer ${st.access}`) return err(401, 'unauthorized', 'Нет авторизации');
-    if (p === '/auth/logout' || p === '/auth/logout-all') return route.fulfill({ status: 204, headers: cors });
     if (p === '/me') return json(200, { user: USER });
     if (p === '/me/settings' && req.method() === 'GET') return json(200, settingsBody(st));
     if (p === '/me/settings' && req.method() === 'PUT') {
@@ -249,6 +264,11 @@ const PUSH_STUB = () => {
     page.on('console', (m) => {
       if (m.type() === 'error' && !/Failed to load resource|status of [45]\d\d|net::ERR_FAILED/.test(m.text())) errors.push(m.text());
     });
+    await ctx.addInitScript(() => {
+      window.__cred = [];
+      const f = window.fetch;
+      window.fetch = (u, o = {}) => { window.__cred.push({ url: String(u), credentials: o.credentials || 'same-origin' }); return f(u, o); };
+    });
     const ctl = { state };
     await mockApi(page, ctl);
     return { ctx, page, errors, ctl };
@@ -306,12 +326,19 @@ const PUSH_STUB = () => {
       ok(await page.locator('.org-card').count() === 2, 'организаций две → экран выбора');
       ok(norm(await page.locator('.org-card[data-id="org_off"]').innerText()).includes('нет связи с 1С'), 'available: false — пометка «нет связи с 1С»');
       await shot(page, '04-vybor-organizacii');
-      const sess = await page.evaluate(() => localStorage.getItem('finpuls-session'));
-      ok(sess && sess.includes('rt_1') && !sess.includes('at_1'), 'в хранилище — refresh-токен; access-токен только в памяти');
+      const storageDump = await page.evaluate(() => JSON.stringify({ ...localStorage }));
+      ok(storageDump.includes('loggedIn') && !/rt_|at_\d|refresh/i.test(storageDump.replace(/refresh_expires/g, '')), 'в хранилище браузера нет ни refresh-, ни access-токена');
+      const cred = await page.evaluate(() => window.__cred);
+      ok(cred.filter((c) => c.url.includes('/auth/token')).every((c) => c.credentials === 'include') && cred.some((c) => c.url.includes('/auth/token')), '/auth/token — с credentials: include');
+      ok(cred.filter((c) => c.url.includes('/orgs')).every((c) => c.credentials === 'omit'), 'запросы данных — без cookie (credentials: omit)');
       await page.locator('[data-act="pick-org"][data-id="org_test"]').click();
       await settle(page, 900);
       ok((await page.evaluate(() => location.hash)) === '#/home', 'выбрали организацию → главная');
       ok(norm(await page.locator('.hero').innerText()).includes('5 000 000'), 'главная из GET /orgs/{id}/summary');
+      const homeCalls = ctl.calls.filter((c) => c.path.startsWith('/orgs/org_test') || c.path === '/notifications');
+      ok(homeCalls.length === 1 && homeCalls[0].path === '/orgs/org_test/summary', 'главная — одним запросом (без /notifications)');
+      ok((await page.locator('.icon-badge').innerText()) === '2', 'колокольчик — unread_count из сводки');
+      ok(await page.locator('.wk-col.neg').count() > 0, 'красные дни недели — по threshold из сводки');
       ok(ctl.calls.some((c) => c.path === '/orgs/org_test/summary' && c.headers.authorization === 'Bearer at_1'), 'запросы данных с Bearer access-токеном');
       noErrors(errors);
       await ctx.close();
@@ -348,11 +375,10 @@ const PUSH_STUB = () => {
       ctl.state.access = 'at_never';
       const before = ctl.calls.length;
       ctl.override = (call, { json, st }) => {
-        if (call.path === '/auth/refresh' && call.body && call.body.refresh_token === st.refresh) {
+        if (call.path === '/auth/refresh' && st.cookie && !call.body && !call.headers.authorization) {
           st.refreshCount = (st.refreshCount || 0) + 1;
-          st.refresh = 'rt_new';
           st.access = 'at_new';
-          json(200, { access_token: 'at_new', access_expires_in: 900, refresh_token: 'rt_new', refresh_expires_in: 2592000, token_type: 'Bearer' });
+          json(200, { access_token: 'at_new', access_expires_in: 900, refresh_expires_in: 2592000, token_type: 'Bearer' });
           return true;
         }
         return false;
@@ -364,13 +390,14 @@ const PUSH_STUB = () => {
       const refreshes = ctl.calls.slice(before).filter((c) => c.path === '/auth/refresh');
       ok(refreshes.length === 1, `одно обновление на все запросы (было ${refreshes.length})`);
       ok(ctl.calls.slice(before).some((c) => c.path === '/orgs/org_test/summary' && c.headers.authorization === 'Bearer at_new'), 'запрос повторён с новым access-токеном');
-      ok((await page.evaluate(() => localStorage.getItem('finpuls-session'))).includes('rt_new'), 'новый refresh-токен сохранён');
+      const rc = (await page.evaluate(() => window.__cred)).filter((c) => c.url.includes('/auth/refresh'));
+      ok(rc.length > 0 && rc.every((c) => c.credentials === 'include'), 'POST /auth/refresh — по cookie (credentials: include), без тела и Authorization');
       ok(norm(await page.locator('.hero').innerText()).includes('5 000 000'), 'главная открылась без выхода');
       // refresh_invalid → вход
       ctl.override = null;
       ctl.state.expireAccess = 'at_new';
       ctl.state.access = 'at_other';
-      ctl.state.refresh = 'rt_other';
+      ctl.state.cookie = false; // cookie просрочена или отозвана
       await page.locator('.tabbar .tab[data-go="#/reports"]').click();
       await settle(page, 1200);
       ok((await page.evaluate(() => location.hash)) === '#/login', 'refresh_invalid → экран входа');
@@ -411,6 +438,8 @@ const PUSH_STUB = () => {
       await page.locator('.err-state [data-act="retry"]').click();
       await settle(page, 900);
       ok(await page.locator('.wk-table').isVisible(), '«Обновить» → календарь из GET /calendar');
+      const dayTxt = norm(await page.locator('.screen:not(.leaving) .day-card').innerText());
+      ok(dayTxt.includes('−310 000 ₸') && dayTxt.includes('600 USD') && !dayTxt.includes('сумма в'), 'валютная позиция — в тенге (amount_kzt), валюта в подписи');
       ctl.override = (call, { err }) => (call.path === '/orgs/org_test/reports/cash-flow' ? (err(504, 'source_timeout', 'Учёт не успел ответить'), true) : false);
       await page.locator('.tabbar .tab[data-go="#/reports"]').click();
       await settle(page, 900);
@@ -444,22 +473,18 @@ const PUSH_STUB = () => {
       ok(txt.includes('Израсходовано') && txt.includes('500 000 ₸'), 'бюджет: «Израсходовано» = spent + approved_requests');
       ok(txt.includes('Ещё не дошла очередь') && txt.includes('группа согласующих'), 'маршрут: этап «waiting» и этап группы');
       ok(txt.includes('Тест Банк · KZ•• 0001'), 'счёт оплаты из pay_from');
-      // already_decided — приложение перечитывает карточку и пишет, кто и когда
-      ctl.override = (call, { err, json }) => {
-        if (call.path.endsWith('/approve')) return err(409, 'already_decided', 'Решение уже принято'), true;
-        if (call.path === '/orgs/org_test/requests/req_1' && call.method === 'GET' && ctl.state.conflictCard) {
-          return json(200, card({ status: 'approved', my_action: 'none', route: [card().route[0], { stage: 1, kind: 'approval', approver: { name: 'Тест Заместитель', initials: 'ТЗ', position: null, is_group: false }, is_me: false, state: 'done', decision: 'approved', at: T(TODAY, '10:05'), comment: null, on_behalf_of: 'Тест Руководитель', due_at: null }] })), true;
-        }
-        return false;
-      };
-      ctl.state.conflictCard = true;
+      // already_decided — кто и когда приходят в details, карточку не перечитываем
+      ctl.override = (call, { err }) => (call.path.endsWith('/approve')
+        ? (err(409, 'already_decided', 'Заявку уже согласовал Тест Заместитель 11.11.2026 в 10:05', { decided_by: 'Тест Заместитель', decided_at: T(TODAY, '10:05'), decision: 'approved' }), true) : false);
+      const cardReads = () => ctl.calls.filter((c) => c.method === 'GET' && c.path === '/orgs/org_test/requests/req_1').length;
+      const readsBefore = cardReads();
       await approve();
       await settle(page, 900);
-      ok(norm(await page.locator('.decision-state').innerText()).includes('Заявка уже согласована: Тест Заместитель, сегодня, 10:05'), '409 already_decided — кто и когда (из перечитанной карточки)');
+      ok(norm(await page.locator('.decision-state').innerText()).includes('Заявка уже согласована: Тест Заместитель, сегодня, 10:05'), '409 already_decided — кто и когда из details.decided_by / decided_at');
+      ok(cardReads() === readsBefore, 'карточка после 409 не перечитывается');
       await shot(page, '07-uzhe-soglasovano');
       await page.locator('.sheet [data-act="decision-to-list"]').click();
       await settle(page, 800);
-      ctl.state.conflictCard = false;
       // not_awaiting_you
       ctl.override = (call, { err }) => (call.path.endsWith('/approve') ? (err(409, 'not_awaiting_you', 'Заявка не на вашем этапе'), true) : false);
       await open();
@@ -582,7 +607,7 @@ const PUSH_STUB = () => {
       await settle(page, 900);
       ok((await page.evaluate(() => location.hash)) === '#/requests/req_1', 'link.kind = request → карточка заявки');
       const rd = ctl.calls.find((c) => c.path === '/notifications/read');
-      ok(rd && JSON.stringify(rd.body) === JSON.stringify({ ids: ['n_1'] }), 'POST /notifications/read {ids}');
+      ok(rd && JSON.stringify(rd.body) === JSON.stringify({ ids: ['n_1'], org_id: 'org_test' }), 'POST /notifications/read {ids, org_id}');
       await page.evaluate(() => { location.hash = '#/profile'; });
       await settle(page, 800);
       await page.locator('[data-act="logout-all"]').click();
@@ -595,7 +620,8 @@ const PUSH_STUB = () => {
       await page.locator('[data-act="logout"]').click();
       await settle(page, 900);
       const lo = ctl.calls.find((c) => c.path === '/auth/logout');
-      ok(lo && lo.body.refresh_token === ctl.state.refresh, 'POST /auth/logout с текущим refresh_token');
+      ok(lo && !lo.body && !lo.headers.authorization, 'POST /auth/logout — без тела и Authorization, по cookie');
+      ok((await page.evaluate(() => window.__cred)).filter((c) => c.url.includes('/auth/logout')).every((c) => c.credentials === 'include'), 'выход — с credentials: include');
       ok((await page.evaluate(() => location.hash)) === '#/login' && !(await page.evaluate(() => localStorage.getItem('finpuls-session'))), 'выход → вход, токены удалены');
       noErrors(errors);
       await ctx.close();
@@ -628,7 +654,7 @@ const PUSH_STUB = () => {
       await settle(page, 400);
       await page.locator('.sheet [data-act="logout-all-confirm"]').click();
       await settle(page, 1000);
-      ok(ctl.calls.some((c) => c.path === '/auth/logout-all' && c.method === 'POST'), 'POST /auth/logout-all');
+      ok(ctl.calls.some((c) => c.path === '/auth/logout-all' && c.method === 'POST' && !c.headers.authorization && !c.body), 'POST /auth/logout-all — по cookie, без тела и Authorization');
       ok((await page.evaluate(() => location.hash)) === '#/login' && !(await page.evaluate(() => localStorage.getItem('finpuls-session'))), 'выход везде → вход, токены удалены');
       ok(norm(await page.locator('.toast').innerText()).includes('Вы вышли на всех устройствах'), '«Вы вышли на всех устройствах»');
       noErrors(errors);

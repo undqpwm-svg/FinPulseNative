@@ -7,7 +7,7 @@ export let data = null;
 export let state = null;
 
 // Временное состояние экранов — не сохраняется
-export const ui = { calMode: 'week', reqTab: 'pending', ddsSel: null, leaving: null, pendingPhone: '' };
+export const ui = { calMode: 'week', reqTab: 'pending', ddsSel: null, leaving: null };
 
 const defaults = () => ({
   auth: { logged: false, phone: '' },

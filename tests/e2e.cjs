@@ -97,33 +97,47 @@ async function runFlow(browser, name, opts, isPhone) {
   await page.goto(BASE);
   await page.evaluate(() => localStorage.clear());
   await page.goto(BASE);
-  await page.waitForSelector('.screen #phone');
+  await page.waitForSelector('.screen [data-act="tg-start"]');
   await page.evaluate(() => document.fonts.ready);
   await settle(page, 1700);
 
   // --- вход ---
   ok(await page.locator('.login-foot').innerText().then(norm) === 'SmartSol × FINTAX CONSULT', 'на входе подпись SmartSol × FINTAX CONSULT');
-  ok(await page.locator('[data-submit]').isDisabled(), 'кнопка «Получить код» неактивна без номера');
+  ok((await page.locator('[data-act="tg-start"]').innerText().then(norm)).includes('Войти через Telegram'), 'кнопка «Войти через Telegram»');
+  ok(await page.locator('#phone').count() === 0, 'поля номера телефона нет');
   await noHScroll(page, 'Вход');
   if (isPhone) await shot(page, '01-vhod');
   ok(await page.locator('[data-act="mode-demo"]').isVisible(), 'по умолчанию — настоящий вход, есть «Посмотреть демо»');
   await page.locator('[data-act="mode-demo"]').click();
   await settle(page, 700);
   ok((await page.locator('.login-hint').innerText().then(norm)).includes('Демо'), 'включён демо-режим');
-  await page.locator('#phone').fill('7015551234');
-  ok(await page.locator('#phone').inputValue() === '701 555 12 34', 'маска номера телефона');
-  await page.locator('[data-submit]').click();
-  await settle(page);
-  ok((await screenKey(page)) === '#/code', 'переход к вводу кода');
-  ok(await page.locator('.demo-chip').isVisible(), 'подсказка «демо: любой код»');
-  await page.locator('#code').fill('48');
-  await settle(page, 200);
-  if (isPhone) await shot(page, '02-kod-iz-sms');
-  await page.locator('#code').fill('4821');
-  await settle(page, 1100);
+  // неверное число → challenge_rejected (wrong_number) → «Начать заново»
+  await tap(page, '[data-act="tg-start"]');
+  await settle(page, 1300);
+  ok((await screenKey(page)) === '#/telegram', 'экран «Выберите в Telegram число»');
+  const code1 = (await page.locator('.screen:not(.leaving) [data-tg-code]').innerText()).trim();
+  ok(/^\d{2}$/.test(code1), `крупное двузначное число (${code1})`);
+  ok(await page.locator('.sheet-wrap .tgbot-btn').count() === 3, 'демо-бот: три кнопки с числами');
+  ok((await page.locator('.sheet-wrap .tgbot-btn').allInnerTexts()).map((x) => x.trim()).includes(code1), 'среди кнопок бота — число с экрана');
+  if (isPhone) await shot(page, '02a-demo-bot');
+  const wrong = await page.locator('.sheet-wrap .tgbot-btn').evaluateAll((bs, c) => bs.map((b) => b.dataset.v).find((v) => v !== c), code1);
+  await page.locator(`.sheet-wrap .tgbot-btn[data-v="${wrong}"]`).click();
+  await page.waitForSelector('.screen:not(.leaving) #tg-err:not([hidden])', { timeout: 6000 });
+  ok((await page.locator('.screen:not(.leaving) #tg-err').innerText().then(norm)).includes('выбрано другое число'), 'неверное число — «Начните вход заново»');
+  await settle(page, 300);
+  if (isPhone) await shot(page, '02b-drugoe-chislo');
+  // заново → верное число → вход
+  await tap(page, '[data-restart]');
+  await settle(page, 1300);
+  const code2 = (await page.locator('.screen:not(.leaving) [data-tg-code]').innerText()).trim();
+  ok(await page.locator('.screen:not(.leaving) [data-tg-left]').innerText().then((t) => /^[45]:\d\d$/.test(t.trim())), 'таймер жизни числа (5 минут)');
+  if (isPhone) await shot(page, '02c-vyberite-chislo');
+  await page.locator(`.sheet-wrap .tgbot-btn[data-v="${code2}"]`).click();
+  await page.waitForFunction(() => location.hash === '#/orgs', null, { timeout: 8000 });
+  await settle(page, 900);
 
   // --- выбор организации ---
-  ok((await screenKey(page)) === '#/orgs', 'любой код пускает дальше → выбор организации');
+  ok((await screenKey(page)) === '#/orgs', 'верное число в боте → выбор организации');
   ok(await page.locator('.org-card').count() === 3, 'три организации с мини-сводкой');
   await noHScroll(page, 'Организации');
   if (isPhone) await shot(page, '03-vybor-organizacii');
@@ -412,7 +426,7 @@ async function desktopFrame(browser) {
   await page.goto(BASE);
   await page.evaluate(() => localStorage.clear());
   await page.goto(BASE);
-  await page.waitForSelector('.screen #phone');
+  await page.waitForSelector('.screen [data-act="tg-start"]');
   await page.evaluate(() => document.fonts.ready);
   await settle(page, 1700);
   ok(await page.evaluate(() => document.documentElement.classList.contains('framed')), 'на компьютере включена рамка телефона');

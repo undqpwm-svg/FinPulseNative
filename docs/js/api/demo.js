@@ -1,7 +1,7 @@
 // Реализация API «демо»: выдуманные данные из data/demo.json (расчёты — store.js), ответы в той же форме DTO, что
 // ждём от сервера (spec/api-client.md). Сеть не используется; решения и прочитанное — в хранилище браузера.
 import * as S from '../store.js';
-import { ApiError, maskPhone } from './core.js';
+import { ApiError } from './core.js';
 import { iso, sum } from '../util.js';
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -22,22 +22,62 @@ export function session_() {
   return S.state.auth.logged ? { token: 'demo', expiresAt: null, user: userDto() } : null;
 }
 
-export async function requestCode(digits10) {
-  await wait(250);
-  S.ui.pendingPhone = digits10;
-  return { requestId: 'demo', codeLength: 4, expiresIn: 300, resendIn: 59, phoneMasked: maskPhone(digits10), channel: 'whatsapp' };
+// Вход через Telegram — имитация сценария контракта (2): число, «бот» с тремя кнопками (шторка в приложении),
+// опрос. Верное число — вход; неверное — challenge_rejected (wrong_number), третье неверное подряд — blocked на 15 мин.
+// Состояние — в памяти: перезагрузка страницы сбрасывает блокировку демо.
+const tg = { ch: null, wrong: 0, blockedUntil: 0 };
+
+export async function startLogin() {
+  await wait(350);
+  const code = String(10 + Math.floor(Math.random() * 90));
+  tg.ch = { id: `demo_${Date.now()}`, code, picked: null, until: Date.now() + 300e3 };
+  return { challengeId: tg.ch.id, botUrl: null, matchCode: code, expiresIn: 300, pollInterval: 2, demoBot: true };
 }
 
-export async function verifyCode({ digits10 }) {
-  await wait(300);
-  const d = digits10 || S.ui.pendingPhone;
-  S.login(d ? `+7 ${d.slice(0, 3)} ${d.slice(3, 6)} ${d.slice(6, 8)} ${d.slice(8)}` : S.data.user.phone);
-  return session_();
+// Что «бот» показывает: верное число и два других, в случайном порядке.
+export function demoBotOptions() {
+  if (!tg.ch) return [];
+  const set = new Set([tg.ch.code]);
+  while (set.size < 3) set.add(String(10 + Math.floor(Math.random() * 90)));
+  return [...set].sort(() => Math.random() - 0.5);
+}
+
+export async function demoBotPick(code) {
+  if (tg.ch) tg.ch.picked = String(code);
+}
+
+const rejected = (reason, message, retry) => new ApiError('challenge_rejected', message,
+  { reason, contractCode: 'challenge_rejected', ...(retry ? { retry_after: retry } : {}) }, 409, retry || 0);
+
+export async function pollLogin(challengeId) {
+  await wait(150);
+  const ch = tg.ch;
+  if (!ch || ch.id !== challengeId) throw new ApiError('not_found', 'Вход не найден', { contractCode: 'not_found' }, 404);
+  if (tg.blockedUntil > Date.now()) {
+    throw rejected('blocked', 'Слишком много неверных попыток. Вход через Telegram заблокирован на 15 минут.', Math.ceil((tg.blockedUntil - Date.now()) / 1000));
+  }
+  if (!ch.picked) {
+    if (Date.now() > ch.until + 30e3) throw new ApiError('challenge_expired', 'Время входа истекло. Начните заново.', { contractCode: 'challenge_expired' }, 410);
+    return { status: 'pending' };
+  }
+  tg.ch = null;
+  if (ch.picked !== ch.code) {
+    tg.wrong++;
+    if (tg.wrong >= 3) {
+      tg.wrong = 0;
+      tg.blockedUntil = Date.now() + 900e3;
+      throw rejected('blocked', 'Три раза подряд выбрано неверное число. Вход через Telegram заблокирован на 15 минут.', 900);
+    }
+    throw rejected('wrong_number', 'В Telegram выбрано другое число. Начните вход заново.');
+  }
+  tg.wrong = 0;
+  S.login(S.data.user.phone);
+  return { status: 'ok', session: session_() };
 }
 
 export async function logout() {
   S.logout();
-  S.ui.pendingPhone = '';
+  tg.ch = null;
 }
 
 // В демо одно «устройство» — выход везде равен обычному выходу.
@@ -70,7 +110,7 @@ function org(id) {
 }
 
 export async function orgs() {
-  return { items: S.data.orgs.map(orgDto) };
+  return { items: S.data.orgs.map(orgDto), partial: false };
 }
 
 // ---------- главная ----------

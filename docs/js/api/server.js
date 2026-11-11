@@ -2,7 +2,7 @@
 // Это переходник: запросы — как в контракте, ответы переводятся в DTO, которые ждут экраны (spec/api-client.md).
 // Экраны о контракте не знают: поменяется контракт — правится только этот файл.
 import { CONFIG } from '../config.js';
-import { ApiError, storage, e164 } from './core.js';
+import { ApiError, storage } from './core.js';
 
 // ---------- сессия ----------
 // access-токен (15 мин) — только в памяти. refresh-токен — в cookie HttpOnly fp_refresh: приложение его не видит и
@@ -46,8 +46,6 @@ export function clearSession() {
 const CODE_MAP = {
   source_unavailable: 'upstream_unavailable', // база 1С не отвечает
   source_timeout: 'timeout', // база 1С не успела за 20 с
-  invalid_code: 'code_invalid',
-  phone_blocked: 'too_many_attempts', // экран кода: таймер и блокировка ввода
   not_awaiting_you: 'forbidden', // решение: «заявка не на вашем этапе»
   refresh_invalid: 'unauthorized',
   internal_error: 'server_error',
@@ -192,28 +190,32 @@ export function session_() {
   return s ? { token: access && access.token, user: userDto(s.user) } : null;
 }
 
-export async function requestCode(digits10) {
-  const res = await send('POST', '/auth/code', { body: { phone: e164(digits10) } });
+// Вход через Telegram-бота (2.1): число для сверки и ссылка на бота. Тело пустое — {}.
+export async function startLogin() {
+  const res = await send('POST', '/auth/telegram/start', { body: {} });
   if (!res.ok) throw await toError(res);
   const r = await res.json();
   return {
-    requestId: r.challenge_id,
-    codeLength: r.code_length || 4,
-    expiresIn: r.expires_in || 300,
-    resendIn: r.resend_after || 60,
-    phoneMasked: formatPhone(e164(digits10)), // контракт, 2.1: «Отправили код в WhatsApp на +7 701 555 12 34»
-    channel: r.channel || 'whatsapp',
+    challengeId: r.challenge_id,
+    botUrl: r.bot_url, // имя бота задаёт сервер — ссылку не собираем сами
+    matchCode: String(r.match_code ?? ''),
+    expiresIn: Number(r.expires_in) || 300,
+    pollInterval: Math.max(1, Number(r.poll_interval) || 2),
   };
 }
 
-export async function verifyCode({ requestId, code }) {
-  const res = await send('POST', '/auth/token', { body: { challenge_id: requestId, code } });
+// Опрос (2.2): 202 — ещё не подтвердили; 200 — вход, refresh-токен пришёл в cookie (credentials: 'include').
+// Ошибки — ApiError: access_revoked, challenge_rejected (details.reason), challenge_expired, too_many_requests,
+// not_found, upstream_unavailable (503 source_unavailable — вход отменён).
+export async function pollLogin(challengeId) {
+  const res = await send('POST', '/auth/telegram/poll', { body: { challenge_id: challengeId } });
+  if (res.status === 202) return { status: 'pending' };
   if (!res.ok) throw await toError(res);
   const r = await res.json();
   if (!r.access_token) throw new ApiError('server_error', 'Сервер не выдал сессию');
   orgsCache = null;
   saveTokens(r, r.user);
-  return session_();
+  return { status: 'ok', session: session_() };
 }
 
 // Выход (2.4): без Authorization и без тела, по cookie; сервер удаляет cookie. Ответ всегда 204.
@@ -253,10 +255,8 @@ function orgDto(o) {
     name: o.name,
     short: o.short_name || o.name,
     initials: o.initials,
-    city: null,
-    // в v1 city и activity — null; строку под названием используем для «Нет связи с 1С» (available: false)
-    activity: o.available === false ? 'нет связи с 1С' : null,
-    available: o.available !== false,
+    city: null, // в v1 city и activity приходят null — не выводим
+    activity: null,
     summary: {
       money: o.money_total,
       pending: o.pending_requests,
@@ -268,7 +268,7 @@ function orgDto(o) {
 export async function orgs() {
   const r = await getJSON('/orgs'); // список перечитываем при каждом открытии экрана (4.2)
   orgsCache = (r.items || []).map(orgDto);
-  return { items: orgsCache };
+  return { items: orgsCache, partial: r.partial === true }; // partial: учёт части компаний не ответил
 }
 
 async function orgInfo(id) {

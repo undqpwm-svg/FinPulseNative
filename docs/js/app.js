@@ -39,9 +39,9 @@ function parse() {
 }
 
 function guard(r) {
-  if (!api.session()) return ['login', 'code'].includes(r.name) ? null : '#/login';
+  if (!api.session()) return ['login', 'telegram'].includes(r.name) ? null : '#/login';
   if (!api.orgId()) return r.name === 'orgs' ? null : '#/orgs';
-  if (!r.name || r.name === 'login' || r.name === 'code' || !views[r.name]) return '#/home';
+  if (!r.name || r.name === 'login' || r.name === 'telegram' || !views[r.name]) return '#/home';
   return null;
 }
 

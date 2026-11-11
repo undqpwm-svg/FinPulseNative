@@ -76,6 +76,3 @@ export function uuid() {
   }
 }
 
-// Номер в формате E.164 из 10 цифр после +7
-export const e164 = (digits10) => `+7${digits10}`;
-export const maskPhone = (digits10) => (digits10 && digits10.length === 10 ? `+7 ${digits10.slice(0, 3)} ··· ${digits10.slice(6, 8)} ${digits10.slice(8)}` : '');

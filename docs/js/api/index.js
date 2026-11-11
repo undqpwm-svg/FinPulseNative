@@ -40,8 +40,8 @@ export const api = {
   init: () => call('init'),
   // вход
   session: () => impl().session_(),
-  requestCode: (digits10) => call('requestCode', digits10),
-  verifyCode: (p) => call('verifyCode', p),
+  startLogin: () => call('startLogin'),
+  pollLogin: (challengeId) => call('pollLogin', challengeId),
   logout: () => call('logout'),
   logoutAll: () => call('logoutAll'),
   me: () => call('me'),
@@ -70,4 +70,6 @@ export const api = {
   deletePushSubscription: (endpoint) => call('deletePushSubscription', endpoint),
   // только демо
   resetDemo: () => call('resetDemo'),
+  demoBotOptions: () => (isDemo() ? demo.demoBotOptions() : []),
+  demoBotPick: (code) => call('demoBotPick', code),
 };

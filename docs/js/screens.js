@@ -16,7 +16,7 @@ export const actions = {};
 // Состояние экранов (не данные): режимы, выбранное, последний загруженный объект для действий.
 export const ui = {
   calMode: 'week', reqTab: 'pending', ddsSel: null, leaving: null,
-  phone: '', otp: null, request: null, decision: null, busy: false, pushOffered: false, notifs: [],
+  tg: null, request: null, decision: null, busy: false, pushOffered: false, notifs: [],
 };
 
 const H = esc;
@@ -104,6 +104,7 @@ const errorIcon = (code) => (code === 'network' || code === 'timeout' ? I.info :
 // Экран ошибки на месте экрана (с заголовком раздела и «Обновить»).
 export function errorView(e, base = {}) {
   const t = errorText(e);
+  if (base.text) [t.title, t.text] = base.text; // свой текст для экрана (например, «Нет связи с учётом компании»)
   return {
     key: base.key || `error:${base.title || ''}`,
     tab: base.tab,
@@ -117,7 +118,7 @@ export function errorView(e, base = {}) {
           <span class="empty-ic err">${errorIcon(t.code)}</span>
           <b>${t.title}</b>
           <span>${t.text}</span>
-          <button class="btn btn-secondary" data-act="retry">${I.refresh}Обновить</button>
+          <button class="btn btn-secondary" data-act="retry">${I.refresh}${base.retry || 'Обновить'}</button>
         </div>
       </div>`,
   };
@@ -131,7 +132,7 @@ actions.retry = () => {
 // Сессия истекла или отозвана: стираем и — на вход.
 export function onUnauthorized(e) {
   invalidate();
-  ui.otp = null;
+  ui.tg = null;
   nav.badge = null;
   // Доступ выключил администратор (403 access_revoked) — показать его текст на экране входа.
   if (e instanceof ApiError && e.code === 'access_revoked') {
@@ -155,38 +156,33 @@ function actionError(e) {
 // ======================================================================
 // ВХОД
 // ======================================================================
-function formatPhone(d) {
-  d = d.slice(0, 10);
-  return [d.slice(0, 3), d.slice(3, 6), d.slice(6, 8), d.slice(8, 10)].filter(Boolean).join(' ');
-}
+// Вход через Telegram-бота SmartSol (контракт, 2): число на экране → бот в Telegram → опрос сервера.
+const TG_BLOCK_KEY = 'finpuls-tg-blocked'; // аккаунт заблокирован на 15 минут (challenge_rejected, blocked)
+const blockedLeft = () => Math.max(0, Math.ceil(((Number(storage.get(TG_BLOCK_KEY)) || 0) - Date.now()) / 1000));
+const mmss = (sec) => `${Math.floor(sec / 60)}:${String(Math.max(0, sec) % 60).padStart(2, '0')}`;
 
 function minutesText(sec) {
   const m = Math.max(1, Math.ceil(sec / 60));
   return `${m} ${plural(m, ['минуту', 'минуты', 'минут'])}`;
 }
 
-function secondsText(sec) {
-  const s = Math.max(1, Math.ceil(sec));
-  return s >= 60 ? minutesText(s) : `${s} ${plural(s, ['секунду', 'секунды', 'секунд'])}`;
-}
-
+// Ошибка POST /auth/telegram/start — текст под кнопкой входа.
 function loginErrorText(e) {
   const c = e instanceof ApiError ? e.code : '';
-  const raw = (e && e.details && e.details.contractCode) || c;
-  if (raw === 'resend_too_early') return `Код уже отправлен. Новый можно запросить через ${secondsText(e.retryAfter || 60)}.`;
-  if (raw === 'phone_blocked') return `Номер заблокирован после 5 неверных кодов. Повторите через ${minutesText(e.retryAfter || 900)}.`;
-  if (raw === 'too_many_requests') return `На этот номер уже отправлено 5 кодов за час. Повторите через ${minutesText(e.retryAfter || 3600)}.`;
-  if (c === 'rate_limited' || c === 'too_many_attempts') return `Слишком много запросов кода. Повторите через ${minutesText(e.retryAfter || 600)}.`;
-  if (c === 'access_revoked') return e.message || 'Доступ к приложению выключен. Обратитесь к администратору ФинПульса в своей компании.';
-  if (c === 'invalid_phone' || c === 'validation_error') return 'Проверьте номер: 10 цифр после +7.';
+  if (c === 'too_many_requests' || c === 'rate_limited') return `Слишком много попыток входа с этого адреса. Повторите через ${minutesText(e.retryAfter || 600)}.`;
+  if (c === 'access_revoked') return H(e.message) || 'Доступ к приложению выключен. Обратитесь к администратору ФинПульса в своей компании.';
   if (c === 'upstream_unavailable') return 'Нет связи с учётом компании. Повторите через минуту.';
   if (c === 'app_outdated') return 'Версия приложения устарела — обновите страницу.';
+  if (c === 'maintenance') return 'Сервер на обслуживании. Повторите чуть позже.';
   if (c === 'network' || c === 'timeout' || c === 'server_unavailable') return 'Нет связи с сервером. Проверьте интернет и повторите.';
-  return 'Не удалось отправить код. Повторите через минуту.';
+  return 'Не удалось начать вход. Повторите через минуту.';
 }
 
+const tgHint = () => (isDemo()
+  ? 'Демо: бот SmartSol откроется прямо в приложении'
+  : `Откроется бот SmartSol в${NB}Telegram. Паролей и${NB}кодов нет`);
+
 views.login = async () => {
-  const ph = ui.phone;
   const demo = isDemo();
   return {
     key: 'login', depth: 0, theme: 'dark', title: 'Вход',
@@ -204,207 +200,266 @@ views.login = async () => {
       </div>
       <h1 class="login-title">Деньги компании —<br>в&nbsp;вашем телефоне</h1>
       <p class="login-sub">Остатки, платёжный календарь и&nbsp;согласование заявок из&nbsp;1С:Бухгалтерии</p>
-      <form class="login-form" data-form="phone" novalidate>
-        <label class="field-label" for="phone">Номер телефона</label>
-        <div class="phone-field">
-          <span class="phone-prefix">+7</span>
-          <input id="phone" name="phone" type="tel" inputmode="numeric" autocomplete="tel-national" placeholder="701 555 12 34" value="${H(formatPhone(ph))}" maxlength="13">
-        </div>
+      <div class="login-form">
         <div class="form-err" id="login-err" role="alert" hidden></div>
-        <button class="btn btn-primary btn-block" type="submit" data-submit ${ph.length === 10 ? '' : 'disabled'}>Получить код</button>
-        <p class="login-hint">${demo ? 'Демо: подойдёт любой номер и любой код' : `Код придёт в${NB}WhatsApp`}</p>
-      </form>
+        <button class="btn btn-primary btn-block btn-tg" data-act="tg-start" data-submit>${I.tg}<span>Войти через Telegram</span></button>
+        <p class="login-hint">${tgHint()}</p>
+      </div>
       <div class="login-foot">SmartSol × FINTAX CONSULT</div>
     </div>`,
     mount(el) {
-      const input = el.querySelector('#phone');
-      const btn = el.querySelector('[data-submit]');
+      ui.tg = null;
       const err = el.querySelector('#login-err');
+      const btn = el.querySelector('[data-submit]');
       if (ui.loginNotice) {
         err.hidden = false;
         err.innerHTML = `${I.alert}<span>${H(ui.loginNotice)}</span>`;
         ui.loginNotice = null;
       }
-      input.addEventListener('input', () => {
-        let d = input.value.replace(/\D/g, '');
-        if (d.length > 10 && (d[0] === '7' || d[0] === '8')) d = d.slice(1);
-        ui.phone = d.slice(0, 10);
-        input.value = formatPhone(ui.phone);
-        btn.disabled = ui.phone.length !== 10;
-        err.hidden = true;
-      });
-      el.querySelector('form').addEventListener('submit', async (e) => {
-        e.preventDefault();
-        if (ui.phone.length !== 10 || btn.classList.contains('loading')) return;
-        input.blur();
-        btn.classList.add('loading');
-        btn.innerHTML = `${spinner}Отправляем код…`;
-        try {
-          const r = await api.requestCode(ui.phone);
-          ui.otp = { ...r, digits10: ui.phone, sentAt: Date.now() };
-          navigate('#/code');
-        } catch (ex) {
-          btn.classList.remove('loading');
-          btn.textContent = 'Получить код';
-          err.hidden = false;
-          err.innerHTML = `${I.alert}<span>${loginErrorText(ex)}</span>`;
-        }
-      });
+      // Telegram-аккаунт заблокирован на 15 минут — кнопка с таймером.
+      const drawBlock = () => {
+        const left = blockedLeft();
+        btn.disabled = left > 0;
+        btn.querySelector('span').textContent = left > 0 ? `Вход снова через ${mmss(left)}` : 'Войти через Telegram';
+        return left;
+      };
+      if (drawBlock() > 0) {
+        const t = setInterval(() => {
+          if (!el.isConnected || drawBlock() <= 0) clearInterval(t);
+        }, 1000);
+      }
     },
   };
+};
+
+// Начать вход: POST /auth/telegram/start → число и ссылка на бота. Окно для Telegram открываем сразу по нажатию
+// (иначе браузер сочтёт его всплывающим и заблокирует), адрес подставляем, когда придёт ответ.
+actions['tg-start'] = async (b) => {
+  if (b.classList.contains('loading') || blockedLeft() > 0) return;
+  const demo = isDemo();
+  const label = b.innerHTML;
+  const err = document.querySelector('.screen:not(.leaving) #login-err, .screen:not(.leaving) #tg-err');
+  let w = null;
+  if (!demo) {
+    try {
+      w = window.open('', '_blank');
+    } catch (e) {
+      w = null;
+    }
+  }
+  b.classList.add('loading');
+  b.innerHTML = `${spinner}Начинаем вход…`;
+  try {
+    const r = await api.startLogin();
+    if (w) {
+      w.opener = null;
+      w.location.href = r.botUrl;
+    }
+    ui.tg = { ...r, startedAt: Date.now(), opened: !!w };
+    if (location.hash === '#/telegram') nav.rerender();
+    else navigate('#/telegram');
+  } catch (e) {
+    if (w) w.close();
+    b.classList.remove('loading');
+    b.innerHTML = label;
+    if (err) {
+      err.hidden = false;
+      err.innerHTML = `${I.alert}<span>${loginErrorText(e)}</span>`;
+    } else toast(loginErrorText(e), 'error');
+  }
 };
 
 actions['mode-demo'] = () => {
   setMode('demo');
   invalidate();
-  ui.otp = null;
+  ui.tg = null;
   nav.route();
 };
 
 actions['mode-server'] = () => {
   setMode('server');
   invalidate();
-  ui.otp = null;
+  ui.tg = null;
   nav.route();
 };
 
-views.code = async () => {
-  const otp = ui.otp;
-  if (!otp) return { redirect: '#/login' };
-  const len = otp.codeLength || 6;
+// Экран ожидания: крупное число, «Открыть Telegram ещё раз», опрос POST /auth/telegram/poll раз в poll_interval.
+views.telegram = async () => {
+  const t = ui.tg;
+  if (!t) return { redirect: '#/login' };
+  const demo = !!t.demoBot;
+  const open = demo
+    ? `<button class="btn btn-ghost-dark btn-block" data-act="tg-demo-bot">${I.tg}Открыть бота</button>`
+    : `<a class="btn ${t.opened ? 'btn-ghost-dark' : 'btn-primary'} btn-block" href="${H(t.botUrl)}" target="_blank" rel="noopener noreferrer" data-tg-open>${I.tg}${t.opened ? 'Открыть Telegram ещё раз' : 'Открыть Telegram'}</a>`;
   return {
-    key: 'code', depth: 1, theme: 'dark', title: 'Код из WhatsApp',
+    key: 'telegram', depth: 1, theme: 'dark', title: 'Вход через Telegram',
     html: `<header class="topbar topbar-dark"><button class="tb-btn" data-back="#/login" aria-label="Назад">${I.chevL}</button><div class="tb-title"></div><div class="tb-right"></div></header>
-    <div class="scroll login code-screen">
-      <h1 class="login-title sm">Введите код из&nbsp;WhatsApp</h1>
-      <p class="login-sub">Отправили на&nbsp;${H(otp.phoneMasked || '')}</p>
-      <label class="code-boxes" for="code" style="--len:${len}">
-        ${Array.from({ length: len }, (_, i) => `<span class="code-box" data-i="${i}"></span>`).join('')}
-        <input id="code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="${len}" aria-label="Код из WhatsApp">
-      </label>
-      <div class="form-err on-dark" id="code-err" role="alert" hidden></div>
-      ${isDemo() ? `<div class="demo-chip">${I.info}<span>демо: любой код</span></div>` : ''}
-      <p class="resend" data-resend></p>
+    <div class="scroll login tg-screen">
+      <h1 class="login-title sm">Выберите в&nbsp;Telegram число</h1>
+      <div class="tg-code" data-tg-code aria-label="Число для входа ${H(t.matchCode)}">${H(t.matchCode)}</div>
+      <p class="login-sub tg-sub">Бот SmartSol покажет три числа — нажмите это. При первом входе бот попросит «Поделиться номером».</p>
+      <div class="tg-status" data-tg-status role="status">${spinner}<span data-tg-text>Ждём подтверждения в&nbsp;Telegram</span><b data-tg-left></b></div>
+      <div class="form-err on-dark" id="tg-err" role="alert" hidden></div>
+      <div class="tg-actions" data-tg-actions>${open}</div>
+      <p class="tg-warn">${I.shield}<span>Никому не называйте это число. Если вход начали не${NB}вы — ничего не${NB}нажимайте в${NB}боте.</span></p>
     </div>`,
     mount(el) {
-      const input = el.querySelector('#code');
-      const boxes = [...el.querySelectorAll('.code-box')];
-      const wrap = el.querySelector('.code-boxes');
-      const err = el.querySelector('#code-err');
-      const r = el.querySelector('[data-resend]');
-      let locked = false;
+      const status = el.querySelector('[data-tg-status]');
+      const text = el.querySelector('[data-tg-text]');
+      const leftEl = el.querySelector('[data-tg-left]');
+      const err = el.querySelector('#tg-err');
+      const acts = el.querySelector('[data-tg-actions]');
+      const expiresAt = t.startedAt + t.expiresIn * 1000;
+      const every = t.pollInterval * 1000;
       let timer = null;
-      const paint = () => {
-        const v = input.value;
-        boxes.forEach((b, i) => {
-          b.textContent = v[i] || '';
-          b.classList.toggle('filled', !!v[i]);
-          b.classList.toggle('active', i === Math.min(v.length, len - 1) && document.activeElement === input);
-        });
+      let inflight = false;
+      let done = false;
+      let last = 0;
+      const alive = () => el.isConnected && !done && ui.tg === t;
+      const drawLeft = () => {
+        const s = Math.ceil((expiresAt - Date.now()) / 1000);
+        leftEl.textContent = s > 0 ? mmss(s) : '';
+        if (s <= 0 && !done) text.textContent = 'Время вышло — проверяем';
       };
-      const showErr = (html, { shake = true, clear = true } = {}) => {
+      const tick = setInterval(() => (el.isConnected && !done ? drawLeft() : clearInterval(tick)), 1000);
+      drawLeft();
+      const schedule = (ms) => {
+        clearTimeout(timer);
+        timer = setTimeout(poll, Math.max(0, ms));
+      };
+      // Вернулись из Telegram — опросить сразу, но не чаще poll_interval.
+      const soon = () => {
+        if (alive() && !inflight && document.visibilityState !== 'hidden') schedule(last + every - Date.now());
+      };
+      const stop = () => {
+        done = true;
+        clearTimeout(timer);
+        clearInterval(tick);
+        document.removeEventListener('visibilitychange', soon);
+        window.removeEventListener('focus', soon);
+        window.removeEventListener('tg-poll', soon);
+      };
+      document.addEventListener('visibilitychange', soon);
+      window.addEventListener('focus', soon);
+      window.addEventListener('tg-poll', soon);
+
+      // Вход не удался: текст сервера и «Начать заново» (при блокировке — с таймером).
+      const fail = (msg, { wait = 0, kind = '' } = {}) => {
+        stop();
+        el.querySelector('[data-tg-code]').classList.add('off');
+        status.hidden = true;
         err.hidden = false;
-        err.innerHTML = `${I.alert}<span>${html}</span>`;
-        wrap.classList.remove('ok', 'checking');
-        if (shake) {
-          wrap.classList.remove('bad');
-          void wrap.offsetWidth;
-          wrap.classList.add('bad');
-        }
-        if (clear) input.value = '';
-        paint();
-      };
-      const setResend = (sec) => {
-        clearInterval(timer);
-        let left = Math.max(0, Math.round(sec));
-        const draw = () => {
-          r.innerHTML = left > 0
-            ? `Отправить ещё раз через <b>${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}</b>`
-            : '<button class="link-btn" data-act="resend">Отправить код ещё раз</button>';
-        };
-        draw();
-        timer = setInterval(() => {
-          if (!el.isConnected) return clearInterval(timer);
-          left--;
+        err.dataset.kind = kind;
+        err.innerHTML = `${I.alert}<span>${msg}</span>`;
+        acts.innerHTML = '<button class="btn btn-primary btn-block" data-act="tg-start" data-restart><span>Начать заново</span></button>';
+        if (wait > 0) {
+          const btn = acts.querySelector('[data-restart]');
+          const until = Date.now() + wait * 1000;
+          const draw = () => {
+            const s = Math.ceil((until - Date.now()) / 1000);
+            btn.disabled = s > 0;
+            btn.querySelector('span').textContent = s > 0 ? `Начать заново через ${mmss(s)}` : 'Начать заново';
+            return s;
+          };
           draw();
-          if (left <= 0) clearInterval(timer);
-        }, 1000);
+          const tt = setInterval(() => {
+            if (!el.isConnected || draw() <= 0) clearInterval(tt);
+          }, 1000);
+        }
       };
-      const verify = async () => {
-        locked = true;
-        input.blur();
-        wrap.classList.add('checking');
+      const msg = (e, fallback) => H((e && e.message) || fallback);
+
+      function handle(e) {
+        const c = e instanceof ApiError ? e.code : 'server_error';
+        const d = (e && e.details) || {};
+        if (c === 'challenge_rejected' && d.reason === 'blocked') {
+          const sec = Number(d.retry_after) || e.retryAfter || 900;
+          storage.set(TG_BLOCK_KEY, String(Date.now() + sec * 1000));
+          return fail(msg(e, 'Вход через Telegram заблокирован на 15 минут.'), { wait: sec, kind: 'blocked' });
+        }
+        if (c === 'challenge_rejected') return fail(msg(e, 'В Telegram выбрано другое число. Начните вход заново.'), { kind: 'wrong_number' });
+        if (c === 'access_revoked') return fail(msg(e, 'Этот номер не подключён к ФинПульсу. Обратитесь к администратору компании.'), { kind: 'access_revoked' });
+        if (c === 'challenge_expired') return fail('Время входа истекло. Начните заново — появится новое число.', { kind: 'expired' });
+        if (c === 'not_found') return fail('Вход не найден. Начните заново.', { kind: 'expired' });
+        if (c === 'upstream_unavailable') return fail('Нет связи с учётом компании. Вход отменён — начните заново через минуту.', { wait: e.retryAfter || 60, kind: 'source' });
+        if (c === 'app_outdated') return fail('Версия приложения устарела — обновите страницу.', { kind: 'outdated' });
+        if (c === 'maintenance') return fail('Сервер на обслуживании. Повторите чуть позже.', { wait: e.retryAfter || 0, kind: 'maintenance' });
+        if (c === 'too_many_requests') return schedule(Math.max(every, (e.retryAfter || 0) * 1000)); // опрашиваем реже
+        if (c === 'network' || c === 'timeout' || c === 'server_unavailable') {
+          text.textContent = 'Нет связи — пробуем снова';
+          return schedule(Math.max(every, 4000));
+        }
+        return fail('Не получилось, попробуйте позже.', { kind: 'error' });
+      }
+
+      async function poll() {
+        if (!alive() || inflight) return;
+        inflight = true;
+        last = Date.now();
+        let r;
         try {
-          await api.verifyCode({ requestId: otp.requestId, digits10: otp.digits10, code: input.value });
-          wrap.classList.remove('checking');
-          wrap.classList.add('ok');
-          ui.otp = null;
+          r = await api.pollLogin(t.challengeId);
+        } catch (e) {
+          inflight = false;
+          if (alive()) handle(e);
+          return;
+        }
+        inflight = false;
+        if (!alive()) return;
+        if (r.status === 'ok') {
+          stop();
+          ui.tg = null;
+          storage.remove(TG_BLOCK_KEY);
+          el.querySelector('[data-tg-code]').classList.add('ok');
+          status.classList.add('ok');
+          status.innerHTML = `${I.check}<span>Вход подтверждён</span>`;
+          closeSheet();
           invalidate();
           syncPush();
-          setTimeout(() => navigate('#/orgs', 'push'), 350);
-        } catch (e) {
-          const c = e instanceof ApiError ? e.code : '';
-          if (c === 'code_invalid') {
-            const left = e.details && e.details.attemptsLeft;
-            showErr(`Неверный код${Number.isFinite(left) ? `. Осталось попыток: ${left}` : ''}`);
-            locked = false;
-            input.focus({ preventScroll: true });
-          } else if (c === 'code_expired') {
-            showErr('Код истёк — запросите новый', { shake: false });
-            setResend(0);
-          } else if (c === 'too_many_attempts' || c === 'rate_limited') {
-            showErr(e.details && e.details.contractCode === 'phone_blocked'
-              ? `Слишком много попыток: номер заблокирован на ${minutesText(e.retryAfter || 900)}`
-              : `Слишком много попыток. Запросите новый код${e.retryAfter ? ` через ${minutesText(e.retryAfter)}` : ''}`, { shake: false });
-            input.disabled = true;
-            setResend(e.retryAfter || 0);
-          } else if (c === 'access_revoked') {
-            ui.otp = null;
-            ui.loginNotice = e.message || 'Доступ к приложению выключен. Обратитесь к администратору ФинПульса в своей компании.';
-            replace('#/login', 'pop');
-          } else if (c === 'upstream_unavailable') {
-            const left = Math.max(1, Math.ceil(((otp.expiresIn || 300) * 1000 - (Date.now() - otp.sentAt)) / 60000));
-            showErr(`Нет связи с учётом компании. Код действует ещё ${left} мин. <button class="link-btn" data-act="code-retry">Повторить</button>`, { shake: false, clear: false });
-            ui.retryVerify = verify;
-            locked = false;
-          } else {
-            const t = errorText(e);
-            showErr(`${t.title}. <button class="link-btn" data-act="code-retry">Повторить</button>`, { shake: false, clear: false });
-            ui.retryVerify = verify;
-            locked = false;
-          }
+          setTimeout(() => navigate('#/orgs', 'push'), 450);
+          return;
         }
-      };
-      input.addEventListener('input', () => {
-        if (locked) return;
-        input.value = input.value.replace(/\D/g, '').slice(0, len);
-        err.hidden = true;
-        wrap.classList.remove('bad');
-        paint();
-        if (input.value.length === len) verify();
-      });
-      input.addEventListener('focus', paint);
-      input.addEventListener('blur', paint);
-      setTimeout(() => input.focus({ preventScroll: true }), 350);
-      setResend(Math.max(0, (otp.resendIn || 60) - (Date.now() - otp.sentAt) / 1000));
+        text.innerHTML = `Ждём подтверждения в${NB}Telegram`;
+        schedule(every);
+      }
+
+      schedule(every);
+      if (demo && !t.botShown) {
+        t.botShown = true;
+        setTimeout(() => alive() && demoBotSheet(), 650);
+      }
     },
   };
 };
 
-actions['code-retry'] = () => ui.retryVerify && ui.retryVerify();
+// Демо: «бот SmartSol» в шторке — то же, что пользователь увидит в Telegram.
+function demoBotSheet() {
+  const opts = api.demoBotOptions();
+  if (!opts.length) return;
+  openSheet(`<div class="tgbot">
+      <div class="tgbot-head"><span class="tgbot-ava">${I.tg}</span><div><b>SmartSol</b><small>бот · демо</small></div></div>
+      <div class="tgbot-msg">Вход в ФинПульс. Выберите число, которое видите в приложении.
+        <small>Если вы сейчас не входите в приложение — ничего не нажимайте и никому не называйте числа.</small></div>
+      <div class="tgbot-btns">${opts.map((o) => `<button class="tgbot-btn" data-act="tg-demo-pick" data-v="${H(o)}">${H(o)}</button>`).join('')}</div>
+    </div>
+    <p class="sheet-note">${I.info}Демо: так выглядит бот в Telegram</p>
+    <button class="btn btn-text btn-block" data-act="sheet-close">Свернуть</button>`);
+}
 
-actions.resend = async (t) => {
-  if (!ui.otp) return replace('#/login');
-  t.disabled = true;
-  try {
-    const r = await api.requestCode(ui.otp.digits10);
-    ui.otp = { ...r, digits10: ui.otp.digits10, sentAt: Date.now() };
-    toast('Код отправлен повторно');
-    nav.rerender();
-  } catch (e) {
-    t.disabled = false;
-    toast(loginErrorText(e), 'error');
-  }
+actions['tg-demo-bot'] = () => demoBotSheet();
+
+actions['tg-demo-pick'] = async (b) => {
+  const right = ui.tg && b.dataset.v === ui.tg.matchCode;
+  await api.demoBotPick(b.dataset.v);
+  setSheet(`<div class="tgbot">
+      <div class="tgbot-head"><span class="tgbot-ava">${I.tg}</span><div><b>SmartSol</b><small>бот · демо</small></div></div>
+      <div class="tgbot-msg mine">${H(b.dataset.v)}</div>
+      <div class="tgbot-msg">${right ? 'Готово, вернитесь в приложение.' : 'Выбрано другое число — вход отклонён. Начните вход в приложении заново.'}</div>
+    </div>`);
+  setTimeout(() => {
+    closeSheet();
+    window.dispatchEvent(new Event('tg-poll'));
+  }, 900);
 };
 
 // ======================================================================
@@ -430,8 +485,21 @@ const linkOrg = (hash) => new URLSearchParams(String(hash).split('?')[1] || '').
 // ======================================================================
 views.orgs = async () => {
   const inApp = !!api.orgId();
-  const data = await api.orgs();
+  let data;
+  try {
+    data = await api.orgs();
+  } catch (e) {
+    // 503 source_unavailable — не ответила ни одна компания пользователя (4.2)
+    if (e instanceof ApiError && e.code === 'upstream_unavailable') {
+      return errorView(e, {
+        key: 'error:orgs', title: 'Организации', back: inApp ? '#/home' : '#/login', depth: 2, retry: 'Повторить',
+        text: ['Нет связи с учётом компании', 'Базы 1С сейчас не отвечают. Обычно это ненадолго — повторите через минуту.'],
+      });
+    }
+    throw e;
+  }
   const items = data.items || [];
+  const partial = !!data.partial;
   // Вход из push: организация известна из ссылки (или она одна) — сразу в заявку.
   const link = !inApp && pendingLink();
   if (link) {
@@ -444,7 +512,7 @@ views.orgs = async () => {
     }
   }
   // У пользователя одна организация (настоящий вход) — выбирать нечего.
-  if (!inApp && items.length === 1 && !isDemo()) {
+  if (!inApp && items.length === 1 && !partial && !isDemo()) {
     api.setOrgId(items[0].id);
     return { redirect: '#/home' };
   }
@@ -471,7 +539,8 @@ views.orgs = async () => {
       ${inApp ? '' : `<div class="orgs-brand">${logoMark(36)}<span class="wordmark dark">ФинПульс</span>${demoBadge()}</div>`}
       <h1 class="page-title">${inApp ? 'Организации' : 'Выберите организацию'}</h1>
       <p class="page-sub">Данные по каждой компании приходят из её базы 1С. Переключиться можно в любой момент.</p>
-      <div class="org-list">${cards || `<div class="empty"><span class="empty-ic">${I.building}</span><b>Нет доступных организаций</b><span>Попросите администратора 1С подключить ваш номер к мобильному приложению.</span></div>`}</div>
+      ${partial ? `<div class="partial-note" role="status">${I.info}<span><b>Часть организаций недоступна</b>Учёт некоторых компаний сейчас не отвечает. Список обновится при следующем открытии.</span><button class="link-btn" data-act="retry">Обновить</button></div>` : ''}
+      <div class="org-list">${cards || (partial ? '' : `<div class="empty"><span class="empty-ic">${I.building}</span><b>Нет доступных организаций</b><span>Обратитесь к администратору ФинПульса в своей компании.</span></div>`)}</div>
     </div>`,
   };
 };
@@ -1746,8 +1815,7 @@ actions.logout = async () => {
   if (!demo) await disablePush();
   await api.logout();
   invalidate();
-  ui.phone = '';
-  ui.otp = null;
+  ui.tg = null;
   nav.badge = null;
   if (demo) setMode('server');
   replace('#/login', 'fade');
@@ -1777,8 +1845,7 @@ actions['logout-all-confirm'] = async (t) => {
   ui.busy = false;
   await closeSheet();
   invalidate();
-  ui.phone = '';
-  ui.otp = null;
+  ui.tg = null;
   nav.badge = null;
   if (demo) setMode('server');
   replace('#/login', 'fade');

@@ -229,9 +229,10 @@ export async function logout() {
 export async function logoutAll() {
   try {
     await authed('POST', '/auth/logout-all', { body: {} });
-  } finally {
-    clearSession();
+  } catch (e) {
+    if (e.code !== 'unauthorized' && e.code !== 'access_revoked') throw e; // нет связи — остаёмся, пусть повторит
   }
+  clearSession();
 }
 
 export async function me() {
@@ -309,11 +310,12 @@ export async function home(id) {
     minBalance: s.min_day ? { date: s.min_day.date, amount: s.min_day.closing } : null,
     approvals: { count: s.pending.count, sum: s.pending.amount, overLimit: s.pending.over_limit_count },
     week: ((s.week && s.week.days) || []).map((d) => ({ date: d.date, in: d.inflow, out: d.outflow, end: d.closing })),
-    // В v1 нет просрочки, есть возраст долга: в поле «просрочено» передаём долг старше 60 дней (см. spec/api-client.md).
-    receivables: { total: rec.total, overdue: (rec.aging && rec.aging.days_over_60) || 0, worst: null },
+    receivables: { total: rec.total, aging: agingDto(rec.aging), oldest: null }, // самого старого должника в сводке нет
     unread,
   };
 }
+
+const agingDto = (a) => ({ days_0_30: (a && a.days_0_30) || 0, days_31_60: (a && a.days_31_60) || 0, days_over_60: (a && a.days_over_60) || 0 });
 
 // ---------- счета (5.2) ----------
 export async function accounts(id) {
@@ -510,20 +512,14 @@ function weekFull(w) {
 export async function report(id, kind) {
   if (kind === 'plan') {
     const r = await getJSON(orgPath(id, '/reports/plan-fact'));
-    const row = (x) => ({ article: x.article, plan: x.plan == null ? 0 : x.plan, fact: x.fact || 0 });
+    const row = (x) => ({ article: x.article, plan: x.plan == null ? null : x.plan, fact: x.fact || 0 });
     return { period: r.title, hasPlan: r.has_plan !== false, income: (r.income || []).map(row), expense: (r.expense || []).map(row) };
   }
   if (kind === 'debtors') {
     const r = await getJSON(orgPath(id, `/reports/debtors?${qs({ limit: 5 })}`));
-    const top = (r.items || []).map((d) => ({
-      name: d.counterparty,
-      amount: d.amount,
-      // в v1 нет просрочки: «просрочено» — долг старше 60 дней, «дней» — возраст самого старого документа
-      overdue: (d.aging && d.aging.days_over_60) || 0,
-      days: d.oldest_days || 0,
-    }));
+    const top = (r.items || []).map((d) => ({ name: d.counterparty, amount: d.amount, aging: agingDto(d.aging), days: d.oldest_days || 0 }));
     const topSum = top.reduce((s, d) => s + d.amount, 0);
-    return { asOf: r.date, total: r.total, overdue: (r.aging && r.aging.days_over_60) || 0, top, rest: Math.max(0, r.total - topSum) };
+    return { asOf: r.date, total: r.total, aging: agingDto(r.aging), top, rest: Math.max(0, r.total - topSum) };
   }
   const r = await getJSON(orgPath(id, '/reports/cash-flow'));
   return { period: r.title, weeks: (r.weeks || []).map((w) => ({ label: w.label, full: weekFull(w), in: w.inflow, out: w.outflow })) };
@@ -571,7 +567,7 @@ export async function summary(id) {
     today: { in: s.today.inflow, out: s.today.outflow },
     gap: s.gap ? { date: s.gap.date, deficit: s.gap.shortage } : null,
     approvals: { count: s.pending.count, sum: s.pending.amount },
-    overdue: (s.receivables && s.receivables.aging && s.receivables.aging.days_over_60) || 0,
+    over60: (s.receivables && s.receivables.aging && s.receivables.aging.days_over_60) || 0,
   };
 }
 
@@ -580,13 +576,21 @@ const SETTING_KEYS = ['summary', 'requests', 'payments', 'gaps', 'whatsapp'];
 
 function settingsDto(r) {
   const n = (r && r.notifications) || {};
-  const out = {};
+  const toggles = {};
   notEditable.clear();
   SETTING_KEYS.forEach((k) => {
-    out[k] = !!(n[k] && n[k].enabled);
+    toggles[k] = !!(n[k] && n[k].enabled);
     if (n[k] && n[k].editable === false) notEditable.add(k);
   });
-  return out;
+  return {
+    toggles,
+    locked: [...notEditable],
+    info: {
+      summaryTime: (n.summary && n.summary.time) || null,
+      paymentsMin: n.payments && n.payments.min_amount != null ? n.payments.min_amount : null,
+      gapsDays: n.gaps && n.gaps.days_ahead != null ? n.gaps.days_ahead : null,
+    },
+  };
 }
 
 export const settings = async () => settingsDto(await getJSON('/me/settings'));

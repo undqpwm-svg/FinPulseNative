@@ -121,7 +121,9 @@ export function success({ kind = 'approved', title, text }) {
     el.className = `done-overlay ${kind}`;
     const mark = kind === 'approved'
       ? '<path class="done-mark" d="M30 50.5 43.5 64 70 37"/>'
-      : '<path class="done-mark" d="M36 36 64 64M64 36 36 64"/>';
+      : kind === 'returned'
+        ? '<path class="done-mark" d="M41 33 31 43 41 53M32 43h22a13 13 0 0 1 0 26H44"/>'
+        : '<path class="done-mark" d="M36 36 64 64M64 36 36 64"/>';
     el.innerHTML = `<div class="done-card">
         <svg class="done-svg" viewBox="0 0 100 100" aria-hidden="true">
           <circle class="done-ring" cx="50" cy="50" r="44"/>

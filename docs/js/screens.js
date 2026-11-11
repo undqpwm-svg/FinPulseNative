@@ -1,7 +1,7 @@
 // Экраны и действия. Данные — только через api.* (js/api/index.js): экран не знает, демо это или 1С.
 // Каждый экран — async-функция: получает DTO (spec/api-client.md) и возвращает { key, html, … }.
 import { api, isDemo, setMode, ApiError } from './api/index.js';
-import { uuid } from './api/core.js';
+import { uuid, storage } from './api/core.js';
 import { I, logoMark } from './icons.js';
 import { navigate, replace, openSheet, closeSheet, setSheet, sheetOpen, toast, success, nav } from './ui.js';
 import { enablePush, pushState, shouldOfferPush, markPushOffered, demoNotification, disablePush, syncPush } from './push.js';
@@ -70,6 +70,12 @@ function segmented(items, current, act) {
 }
 
 const spinner = '<span class="spin" aria-hidden="true"></span>';
+
+// Долг по возрасту (дни от даты документа продажи): 0–30 / 31–60 / больше 60. Это возраст, а не просрочка.
+const AGE = [['days_0_30', '0–30 дней', 'a0'], ['days_31_60', '31–60 дней', 'a1'], ['days_over_60', '> 60 дней', 'a2']];
+const ageBar = (aging, scale, cls = '') => `<span class="age-bar ${cls}">${AGE.map(([k, , c]) => ((aging && aging[k]) > 0 && scale > 0
+  ? `<i class="${c}" style="width:${((aging[k] / scale) * 100).toFixed(2)}%"></i>` : '')).join('')}</span>`;
+const ageLegend = (aging) => `<span class="age-legend">${AGE.map(([k, label, c]) => `<span><small><i class="sw sw-${c}"></i>${label}</small><b>${moneyShort((aging && aging[k]) || 0)}</b></span>`).join('')}</span>`;
 const demoBadge = () => (isDemo() ? '<span class="demo-badge">Демо</span>' : '');
 
 // ---------- ошибки: понятный текст вместо белого экрана ----------
@@ -402,12 +408,41 @@ actions.resend = async (t) => {
 };
 
 // ======================================================================
+// ССЫЛКА ИЗ PUSH ДО ВХОДА: после входа открыть заявку, а не главную
+// ======================================================================
+const LINK_KEY = 'finpuls-after-login';
+
+export function rememberLink(hash) {
+  storage.setJSON(LINK_KEY, { hash, at: Date.now() });
+}
+
+function pendingLink() {
+  const v = storage.getJSON(LINK_KEY);
+  if (!v || !v.hash || Date.now() - v.at > 30 * 60e3) return null; // ссылка из push живёт полчаса
+  return v.hash;
+}
+
+const takeLink = () => storage.remove(LINK_KEY);
+const linkOrg = (hash) => new URLSearchParams(String(hash).split('?')[1] || '').get('org');
+
+// ======================================================================
 // ВЫБОР ОРГАНИЗАЦИИ
 // ======================================================================
 views.orgs = async () => {
   const inApp = !!api.orgId();
   const data = await api.orgs();
   const items = data.items || [];
+  // Вход из push: организация известна из ссылки (или она одна) — сразу в заявку.
+  const link = !inApp && pendingLink();
+  if (link) {
+    const lo = linkOrg(link);
+    const target = lo ? items.find((o) => o.id === lo) : items.length === 1 ? items[0] : null;
+    if (target) {
+      api.setOrgId(target.id);
+      takeLink();
+      return { redirect: link };
+    }
+  }
   // У пользователя одна организация (настоящий вход) — выбирать нечего.
   if (!inApp && items.length === 1 && !isDemo()) {
     api.setOrgId(items[0].id);
@@ -447,7 +482,10 @@ actions['pick-org'] = (t) => {
   invalidate();
   nav.badge = null;
   if (prev && prev !== t.dataset.id) toast('Организация переключена');
-  navigate('#/home', 'fade');
+  const link = pendingLink();
+  takeLink();
+  const lo = link && linkOrg(link);
+  navigate(link && (!lo || lo === t.dataset.id) ? link : '#/home', 'fade');
 };
 
 // ======================================================================
@@ -544,7 +582,6 @@ views.home = async () => {
   }).join('');
 
   const rec = d.receivables;
-  const overPct = rec.total ? Math.round((rec.overdue / rec.total) * 100) : 0;
   const fc = d.forecast;
 
   return {
@@ -589,12 +626,10 @@ views.home = async () => {
       <button class="card rec-card" data-go="#/reports/debtors">
         <span class="card-head"><h2>Нам должны</h2><span class="link-btn">Должники ${I.chevR}</span></span>
         <span class="rec-sum">${moneyShort(rec.total)}</span>
-        <span class="rec-bar"><i style="width:${overPct}%"></i></span>
-        <span class="rec-legend">
-          <span><i class="sw sw-neg"></i>Просрочено ${moneyShort(rec.overdue)} · ${overPct}%</span>
-          <span><i class="sw sw-ok"></i>В срок ${moneyShort(rec.total - rec.overdue)}</span>
-        </span>
-        ${rec.worst ? `<span class="rec-worst">${I.clock}<span>Дольше всех: ${H(rec.worst.name)} — ${rec.worst.days} ${plural(rec.worst.days, DAY_FORMS)}</span></span>` : ''}
+        <span class="age-title">Долг по возрасту</span>
+        ${ageBar(rec.aging, rec.total)}
+        ${ageLegend(rec.aging)}
+        ${rec.oldest ? `<span class="rec-worst">${I.clock}<span>Самый старый долг: ${H(rec.oldest.name)} — ${rec.oldest.days} ${plural(rec.oldest.days, DAY_FORMS)}</span></span>` : ''}
       </button>
 
       <p class="foot-note">${I.refresh}<span>Данные 1С на ${d.asOf ? stampAt(d.asOf, d.today) : 'сейчас'}</span></p>
@@ -972,7 +1007,7 @@ async function requestDetail(id) {
   return {
     key: `req:${id}`, depth: 2, title: `Заявка № ${r.num}`,
     html: `${topbar(`Заявка № ${H(r.num)}`, '#/requests')}
-    <div class="scroll has-topbar ${r.canDecide ? 'has-actionbar' : ''}">
+    <div class="scroll has-topbar ${r.canDecide ? 'has-actionbar ab-3-pad' : ''}">
       <section class="req-hero">
         ${statusChip}
         <div class="rh-who">${H(r.contractor)}</div>
@@ -1010,9 +1045,10 @@ async function requestDetail(id) {
         <ol class="route">${(r.route || []).map((s) => routeStep(s, today)).join('')}</ol>
       </section>
     </div>
-    ${r.canDecide ? `<div class="actionbar">
-      <button class="btn btn-ghost" data-act="reject">Отклонить</button>
-      <button class="btn btn-primary" data-act="approve">${I.check}Согласовать</button>
+    ${r.canDecide ? `<div class="actionbar ab-3">
+      <button class="btn btn-ghost btn-sm" data-act="reject">Отклонить</button>
+      <button class="btn btn-ghost btn-sm" data-act="return">На доработку</button>
+      <button class="btn btn-primary ab-main" data-act="approve">${I.check}Согласовать</button>
     </div>` : ''}`,
   };
 }
@@ -1075,18 +1111,41 @@ actions['approve-confirm'] = (t) => submitDecision('approve', '', t);
 
 const REASONS = ['Нет денег в бюджете', 'Перенесём на следующий месяц', 'Нужен другой поставщик', 'Уточните сумму'];
 
-actions.reject = () => {
+// Отклонение и возврат на доработку: комментарий обязателен, его увидит инициатор.
+const COMMENT_KINDS = {
+  reject: {
+    title: 'Отклонить заявку',
+    sub: (who) => `Напишите причину — её увидит ${who}. Без комментария отклонить нельзя.`,
+    reasons: REASONS,
+    placeholder: 'Причина отказа',
+    error: 'Напишите причину отказа',
+    button: 'Отклонить заявку',
+    btnClass: 'btn-danger',
+  },
+  return: {
+    title: 'Вернуть на доработку',
+    sub: (who) => `Это не отказ: ${who} исправит заявку и отправит снова — она опять придёт к вам. Напишите, что исправить.`,
+    reasons: ['Уточните сумму', 'Приложите счёт', 'Поменяйте статью', 'Перенесите дату оплаты'],
+    placeholder: 'Что исправить',
+    error: 'Напишите, что исправить',
+    button: 'Вернуть на доработку',
+    btnClass: 'btn-dark',
+  },
+};
+
+function commentSheet(kind) {
   const r = ui.request;
   if (!r) return;
+  const k = COMMENT_KINDS[kind];
   ui.decision = null;
   const first = (r.initiator.name || '').split(' ')[0] || 'инициатор';
-  openSheet(`<div class="sheet-title">Отклонить заявку</div>
-    <p class="sheet-sub">Напишите причину — её увидит ${H(first)}. Без комментария отклонить нельзя.</p>
-    <div class="chips">${REASONS.map((c) => `<button class="chip" data-act="reason" data-v="${c}">${c}</button>`).join('')}</div>
-    <textarea class="textarea" id="reject-text" rows="3" maxlength="300" placeholder="Причина отказа"></textarea>
-    <div class="field-err" id="reject-err" hidden>${I.alert}<span>Напишите причину отказа</span></div>
+  openSheet(`<div class="sheet-title">${k.title}</div>
+    <p class="sheet-sub">${k.sub(H(first))}</p>
+    <div class="chips">${k.reasons.map((c) => `<button class="chip" data-act="reason" data-v="${c}">${c}</button>`).join('')}</div>
+    <textarea class="textarea" id="reject-text" rows="3" maxlength="1000" placeholder="${k.placeholder}"></textarea>
+    <div class="field-err" id="reject-err" hidden>${I.alert}<span>${k.error}</span></div>
     <div class="sheet-actions">
-      <button class="btn btn-danger btn-block" data-act="reject-confirm">Отклонить заявку</button>
+      <button class="btn ${k.btnClass} btn-block" data-act="${kind}-confirm" data-label="${k.button}">${k.button}</button>
       <button class="btn btn-text btn-block" data-act="sheet-close">Отмена</button>
     </div>`, {
     onMount(wrap) {
@@ -1100,7 +1159,10 @@ actions.reject = () => {
       });
     },
   });
-};
+}
+
+actions.reject = () => commentSheet('reject');
+actions.return = () => commentSheet('return');
 
 actions.reason = (t) => {
   const ta = document.getElementById('reject-text');
@@ -1108,7 +1170,7 @@ actions.reason = (t) => {
   ta.dispatchEvent(new Event('input'));
 };
 
-actions['reject-confirm'] = (t) => {
+function confirmWithComment(kind, t) {
   const ta = document.getElementById('reject-text');
   const text = ta ? ta.value.trim() : '';
   if (!text) {
@@ -1120,8 +1182,11 @@ actions['reject-confirm'] = (t) => {
     ta.focus();
     return;
   }
-  submitDecision('reject', text, t);
-};
+  submitDecision(kind, text, t);
+}
+
+actions['reject-confirm'] = (t) => confirmWithComment('reject', t);
+actions['return-confirm'] = (t) => confirmWithComment('return', t);
 
 actions['decision-retry'] = (t) => {
   const d = ui.decision;
@@ -1192,6 +1257,8 @@ async function submitDecision(kind, comment, btn) {
         ? (res && res.paymentDate ? `Платёж ${amount} стоит в календаре на ${dayMonth(D(res.paymentDate))}` : `Платёж ${amount} согласован`)
         : `Заявка ушла на следующий этап${res.nextApprover ? `: ${H(res.nextApprover)}` : ''}`,
     });
+  } else if (kind === 'return') {
+    await success({ kind: 'returned', title: 'Возвращена на доработку', text: `${H(r.initiator.name)} исправит заявку и отправит снова — она опять придёт к вам` });
   } else {
     await success({ kind: 'rejected', title: 'Заявка отклонена', text: `${H(r.initiator.name)} получит уведомление с вашим комментарием` });
   }
@@ -1210,7 +1277,7 @@ function setSheetIdle() {
   const btn = wrap?.querySelector('.loading');
   if (btn) {
     btn.classList.remove('loading');
-    btn.textContent = 'Отклонить заявку';
+    btn.textContent = btn.dataset.label || 'Отправить';
   }
 }
 
@@ -1323,7 +1390,14 @@ function ddsReport(rep) {
     <p class="hint-line">${I.info}<span>Нажмите на неделю, чтобы увидеть суммы</span></p>`;
 }
 
+// Строка без плана (статьи нет в бюджете или бюджета на месяц нет): только факт.
+const factRow = (x) => `<div class="pf noplan">
+    <div class="pf-top"><span>${H(x.article)}</span><b>${moneyShort(x.fact || 0)}</b></div>
+    <div class="pf-sub"><span>факт, плана нет</span></div>
+  </div>`;
+
 function pfRow(x, income = false) {
+  if (x.plan == null) return factRow(x);
   const p = x.plan ? Math.round((x.fact / x.plan) * 100) : 0;
   const over = !income && x.fact > x.plan;
   const scale = Math.max(x.plan, x.fact) || 1;
@@ -1340,7 +1414,18 @@ function pfRow(x, income = false) {
 }
 
 function planFact(rep) {
-  const overs = (rep.expense || []).filter((x) => x.fact > x.plan);
+  if (rep.hasPlan === false) {
+    return `<div class="noplan-note">
+        <span class="noplan-ic">${I.calendar}</span>
+        <div><b>Бюджет на месяц не задан</b><span>План сравнивать не с чем — показываем только фактические оплаты.</span></div>
+      </div>
+      ${(rep.income || []).length ? `<section class="card"><div class="card-head"><h2>Поступления</h2><span class="muted">факт</span></div>${rep.income.map(factRow).join('')}</section>` : ''}
+      <section class="card">
+        <div class="card-head"><h2>Выплаты по статьям</h2><span class="muted">факт</span></div>
+        ${(rep.expense || []).map(factRow).join('')}
+      </section>`;
+  }
+  const overs = (rep.expense || []).filter((x) => x.plan != null && x.fact > x.plan);
   return `${overs.length ? `<div class="over-note">${I.alert}<div><b>${overs.length} ${plural(overs.length, ['статья', 'статьи', 'статей'])} сверх плана</b><span>${overs.map((x) => `${H(x.article)} +${Math.round((x.fact / x.plan - 1) * 100)}%`).join(', ')}</span></div></div>` : ''}
     ${(rep.income || []).length ? `<section class="card"><div class="card-head"><h2>Поступления</h2></div>${rep.income.map((x) => pfRow(x, true)).join('')}</section>` : ''}
     <section class="card">
@@ -1351,16 +1436,14 @@ function planFact(rep) {
 
 function debtorsReport(rep) {
   const list = rep.top || [];
-  const max = list.length ? list[0].amount : 1;
-  const overPct = rep.total ? Math.round((rep.overdue / rep.total) * 100) : 0;
+  const max = list.length ? Math.max(...list.map((d) => d.amount)) : 1;
   return `<section class="card">
       <div class="card-head"><h2>Дебиторка на ${dayMonth(D(rep.asOf))}</h2></div>
       <div class="rec-sum">${moneyShort(rep.total)}</div>
-      <div class="rec-bar"><i style="width:${overPct}%"></i></div>
-      <div class="rec-legend">
-        <span><i class="sw sw-neg"></i>Просрочено ${moneyShort(rep.overdue)} · ${overPct}%</span>
-        <span><i class="sw sw-ok"></i>В срок ${moneyShort(rep.total - rep.overdue)}</span>
-      </div>
+      <span class="age-title">Долг по возрасту</span>
+      ${ageBar(rep.aging, rep.total)}
+      ${ageLegend(rep.aging)}
+      <p class="age-note">${I.info}<span>Возраст — дни от даты акта или накладной. Оплаты гасят самые старые документы первыми.</span></p>
     </section>
     <section class="card">
       <div class="card-head"><h2>Топ-5 должников</h2></div>
@@ -1369,8 +1452,8 @@ function debtorsReport(rep) {
           <span class="debt-rank">${i + 1}</span>
           <div class="debt-main">
             <div class="debt-top"><b>${H(d.name)}</b><b class="debt-sum">${money(d.amount)}</b></div>
-            <div class="debt-bar"><i style="width:${(d.amount / max) * 100}%"></i>${d.overdue ? `<i class="od" style="width:${(d.overdue / max) * 100}%"></i>` : ''}</div>
-            <div class="debt-sub">${d.overdue ? `<span class="tag tag-neg">просрочка ${d.days} ${plural(d.days, DAY_FORMS)}</span><span class="neg">${money(d.overdue)}</span>` : '<span class="tag tag-pos">в срок</span>'}</div>
+            ${ageBar(d.aging, max, 'age-bar-sm')}
+            <div class="debt-sub"><span class="tag">старейший документ — ${d.days} ${plural(d.days, DAY_FORMS)}</span>${d.aging && d.aging.days_over_60 ? `<span class="neg">&gt; 60 дней: ${money(d.aging.days_over_60)}</span>` : ''}</div>
           </div>
         </li>`).join('')}
       </ol>
@@ -1409,6 +1492,7 @@ const N_IC = {
   debt: ['debt', I.trendDown],
   approved: ['in', I.check],
   rejected: ['gap', I.x],
+  returned: ['req', I.refresh],
 };
 
 function linkToHash(link) {
@@ -1489,7 +1573,7 @@ async function openSummary() {
     ['Сегодня', `поступления ${moneyShort(s.today.in)}, платежи ${moneyShort(s.today.out)}`],
     s.gap ? ['Разрыв', `${wdAcc(D(s.gap.date))}, ${dayMonth(D(s.gap.date))}, не хватит ${moneyShort(s.gap.deficit)}`] : ['Разрывы', 'на 4 недели не ожидаются'],
     ['Заявки', n ? `${n} ${plural(n, REQ_FORMS)} ${n % 10 === 1 && n % 100 !== 11 ? 'ждёт' : 'ждут'} решения на ${moneyShort(s.approvals.sum)}` : 'всё согласовано'],
-    ['Просрочка', `покупатели должны ${moneyShort(s.overdue)}`],
+    ['Старый долг', `покупатели должны ${moneyShort(s.over60 || 0)} дольше 60 дней`],
   ];
   const u = (api.session() && api.session().user) || {};
   const t = String(s.asOf).slice(11, 16);
@@ -1509,13 +1593,31 @@ async function openSummary() {
 // ======================================================================
 // ПРОФИЛЬ
 // ======================================================================
+// Подписи: время, сумму и горизонт задаёт администратор — приложение их только показывает.
 const TOGGLES = [
-  ['summary', 'Утренняя сводка', 'Каждый день в 08:30'],
-  ['requests', 'Новые заявки', 'Как только заявка дошла до вас'],
-  ['payments', 'Поступления', 'Оплаты от 500 000 ₸'],
-  ['gaps', 'Кассовые разрывы', 'За 3 дня до разрыва'],
-  ['whatsapp', 'Дублировать в WhatsApp', 'Сводка и разрывы — в чат'],
+  ['summary', 'Утренняя сводка', (i) => `Каждый день в ${i.summaryTime || '08:30'}`],
+  ['requests', 'Новые заявки', () => 'Как только заявка дошла до вас'],
+  ['payments', 'Поступления', (i) => `Оплаты от ${money(i.paymentsMin ?? 500000)}`],
+  ['gaps', 'Кассовые разрывы', (i) => {
+    const n = i.gapsDays ?? 3;
+    return `За ${n} ${plural(n, DAY_FORMS)} до разрыва`;
+  }],
+  ['whatsapp', 'Дублировать в WhatsApp', () => 'Сводка и разрывы — в чат'],
 ];
+
+function toggleRow([k, title, desc], st) {
+  const on = !!st.toggles[k];
+  if ((st.locked || []).includes(k)) {
+    return `<div class="li li-locked" data-k="${k}" role="switch" aria-checked="${on}" aria-disabled="true">
+      <span class="li-main"><b>${title}</b><small>${desc(st.info || {})}</small><small class="li-note">${I.shield}Настраивает администратор</small></span>
+      <span class="switch locked ${on ? 'on' : ''}"><i></i></span>
+    </div>`;
+  }
+  return `<button class="li" data-act="toggle" data-k="${k}" role="switch" aria-checked="${on}">
+      <span class="li-main"><b>${title}</b><small>${desc(st.info || {})}</small></span>
+      <span class="switch ${on ? 'on' : ''}"><i></i></span>
+    </button>`;
+}
 
 function pushRow() {
   const st = pushState();
@@ -1540,7 +1642,7 @@ actions['push-test'] = () => {
 };
 
 views.profile = async () => {
-  const [orgsData, toggles] = await Promise.all([api.orgs(), api.settings()]);
+  const [orgsData, st] = await Promise.all([api.orgs(), api.settings()]);
   const u = (api.session() && api.session().user) || (await api.me()) || {};
   const cur = api.orgId();
   return {
@@ -1564,10 +1666,7 @@ views.profile = async () => {
       <div class="list-label">Уведомления</div>
       <section class="card list">
         ${pushRow()}
-        ${TOGGLES.map(([k, t, d]) => `<button class="li" data-act="toggle" data-k="${k}" role="switch" aria-checked="${!!toggles[k]}">
-          <span class="li-main"><b>${t}</b><small>${d}</small></span>
-          <span class="switch ${toggles[k] ? 'on' : ''}"><i></i></span>
-        </button>`).join('')}
+        ${TOGGLES.map((t) => toggleRow(t, st)).join('')}
       </section>
 
       <div class="list-label">${isDemo() ? 'Демо' : 'Вход'}</div>
@@ -1580,6 +1679,11 @@ views.profile = async () => {
         <button class="li li-danger" data-act="logout">
           <span class="li-ic">${I.logout}</span>
           <span class="li-main"><b>${isDemo() ? 'Выйти из демо' : 'Выйти'}</b>${isDemo() ? '<small>Вернуться к настоящему входу</small>' : ''}</span>
+        </button>
+        <button class="li li-danger" data-act="logout-all">
+          <span class="li-ic">${I.shield}</span>
+          <span class="li-main"><b>Выйти со всех устройств</b><small>Закрыть вход на всех телефонах и компьютерах</small></span>
+          ${I.chevR}
         </button>
       </section>
 
@@ -1647,6 +1751,38 @@ actions.logout = async () => {
   nav.badge = null;
   if (demo) setMode('server');
   replace('#/login', 'fade');
+};
+
+actions['logout-all'] = () => {
+  openSheet(`<div class="sheet-title">Выйти со всех устройств?</div>
+    <p class="sheet-sub">Вход закроется на всех телефонах и компьютерах, уведомления на них перестанут приходить. Чтобы войти снова, понадобится код из WhatsApp.</p>
+    <div class="sheet-actions">
+      <button class="btn btn-danger btn-block" data-act="logout-all-confirm" data-label="Выйти везде">Выйти везде</button>
+      <button class="btn btn-text btn-block" data-act="sheet-close">Отмена</button>
+    </div>`);
+};
+
+actions['logout-all-confirm'] = async (t) => {
+  if (ui.busy) return;
+  const demo = isDemo();
+  setBusy(t, 'Выходим…');
+  try {
+    await api.logoutAll();
+  } catch (e) {
+    setSheetIdle();
+    await closeSheet();
+    actionError(e);
+    return;
+  }
+  ui.busy = false;
+  await closeSheet();
+  invalidate();
+  ui.phone = '';
+  ui.otp = null;
+  nav.badge = null;
+  if (demo) setMode('server');
+  replace('#/login', 'fade');
+  setTimeout(() => toast('Вы вышли на всех устройствах'), 60);
 };
 
 actions['sheet-close'] = () => {

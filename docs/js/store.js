@@ -122,10 +122,10 @@ export function decide(id, status, comment = '') {
   state.events.push({
     id: `e${Date.now()}`,
     org: o.id,
-    type: status === 'approved' ? 'approved' : 'rejected',
+    type: status,
     d: 0,
     t,
-    title: status === 'approved' ? 'Вы согласовали заявку' : 'Вы отклонили заявку',
+    title: { approved: 'Вы согласовали заявку', rejected: 'Вы отклонили заявку', returned: 'Вы вернули заявку на доработку' }[status],
     text: `${r.contractor} · ${money(r.amount)}`,
     link: `request:${id}`,
     read: true,

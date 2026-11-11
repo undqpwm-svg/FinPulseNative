@@ -40,6 +40,12 @@ export async function logout() {
   S.ui.pendingPhone = '';
 }
 
+// В демо одно «устройство» — выход везде равен обычному выходу.
+export async function logoutAll() {
+  await wait(400);
+  await logout();
+}
+
 export async function me() {
   return userDto();
 }
@@ -80,7 +86,7 @@ export async function home(id) {
   const g = S.gap(o, ds);
   const pend = S.pending(o);
   const m = S.minDay(ds);
-  const worst = [...o.debtors].sort((a, b) => b.days - a.days)[0];
+  const oldest = [...o.debtors].sort((a, b) => b.oldest_days - a.oldest_days)[0];
   return {
     today: iso(S.today()),
     asOf: `${iso(S.today())}T${S.data.updatedAt || '08:30'}:00`,
@@ -94,7 +100,7 @@ export async function home(id) {
     minBalance: { date: iso(m.date), amount: m.end },
     approvals: { count: pend.length, sum: sum(pend, (r) => r.amount), overLimit: pend.filter((r) => S.overLimit(r) > 0).length },
     week: ds.slice(0, 7).map((d) => ({ date: iso(d.date), in: d.sumIn, out: d.sumOut, end: d.end })),
-    receivables: { total: o.receivables.total, overdue: o.receivables.overdue, worst: worst && worst.days ? { name: worst.name, days: worst.days } : null },
+    receivables: { total: o.receivables.total, aging: { ...o.receivables.aging }, oldest: oldest ? { name: oldest.name, days: oldest.oldest_days } : null },
     unread: S.unreadCount(o),
   };
 }
@@ -192,17 +198,18 @@ export async function decide(id, reqId, { decision, comment, idempotencyKey }) {
   const o = org(id);
   const r = S.request(reqId, o);
   if (!r) throw new ApiError('not_found', 'Заявка не найдена');
-  if (decision === 'reject' && !String(comment || '').trim()) throw new ApiError('comment_required', 'Укажите причину отказа');
+  if ((decision === 'reject' || decision === 'return') && !String(comment || '').trim()) throw new ApiError('comment_required', 'Укажите комментарий');
   if (r.status !== 'pending') {
     throw new ApiError('already_decided', 'По заявке уже принято решение', {
       status: r.status, by: r.mine ? S.data.user.name : 'другой согласующий', at: r.decision ? stampIso(r.decision.d, r.decision.t) : null,
     }, 409);
   }
   S.setOrg(id);
-  S.decide(r.id, decision === 'approve' ? 'approved' : 'rejected', comment || '');
+  const status = { approve: 'approved', reject: 'rejected', return: 'returned' }[decision];
+  S.decide(r.id, status, comment || '');
   const res = {
-    decision: decision === 'approve' ? 'approved' : 'rejected',
-    requestStatus: decision === 'approve' ? 'approved' : 'rejected',
+    decision: status,
+    requestStatus: status,
     paymentDate: decision === 'approve' ? isoAt(r.due) : null,
     nextApprover: null,
   };
@@ -214,10 +221,11 @@ export async function decide(id, reqId, { decision, comment, idempotencyKey }) {
 export async function report(id, kind) {
   const o = org(id);
   const rep = o.reports;
-  if (kind === 'plan') return { period: rep.period, income: rep.income, expense: rep.expense };
+  if (kind === 'plan') return { period: rep.period, hasPlan: rep.hasPlan !== false, income: rep.income, expense: rep.expense };
   if (kind === 'debtors') {
-    const top = [...o.debtors].sort((a, b) => b.amount - a.amount).slice(0, 5);
-    return { asOf: iso(S.today()), total: o.receivables.total, overdue: o.receivables.overdue, top, rest: o.receivables.total - sum(top, (d) => d.amount) };
+    const top = [...o.debtors].sort((a, b) => b.amount - a.amount).slice(0, 5)
+      .map((d) => ({ name: d.name, amount: d.amount, aging: { ...d.aging }, days: d.oldest_days }));
+    return { asOf: iso(S.today()), total: o.receivables.total, aging: { ...o.receivables.aging }, top, rest: o.receivables.total - sum(top, (d) => d.amount) };
   }
   return { period: rep.period, weeks: rep.dds };
 }
@@ -255,19 +263,24 @@ export async function summary(id) {
     today: { in: ds[0].sumIn, out: ds[0].sumOut },
     gap: g ? { date: iso(g.day.date), deficit: g.deficit } : null,
     approvals: { count: pend.length, sum: sum(pend, (r) => r.amount) },
-    overdue: o.receivables.overdue,
+    over60: o.receivables.aging.days_over_60,
   };
 }
 
 // ---------- настройки ----------
+// Как в контракте v1: WhatsApp настраивает администратор компании — в приложении только для показа.
+const LOCKED = ['whatsapp'];
+const settingsDto = () => ({ toggles: { ...S.state.toggles }, locked: [...LOCKED], info: { summaryTime: '08:30', paymentsMin: 500000, gapsDays: 3 } });
+
 export async function settings() {
-  return { ...S.state.toggles };
+  return settingsDto();
 }
 
 export async function saveSettings(patch) {
+  if (Object.keys(patch).some((k) => LOCKED.includes(k))) throw new ApiError('forbidden', 'Этот переключатель настраивает администратор компании');
   Object.assign(S.state.toggles, patch);
   S.save();
-  return { ...S.state.toggles };
+  return settingsDto();
 }
 
 // ---------- push: в демо ничего не отправляется ----------

@@ -197,6 +197,12 @@ async function mockApi(page, ctl) {
       st.decided = true;
       return json(200, card({ status: 'rejected', my_action: 'rejected', my_decision_at: T(TODAY, '10:20') }));
     }
+    if (p === '/orgs/org_test/requests/req_1/return') {
+      if (!body || !String(body.comment || '').trim()) return err(422, 'comment_required', 'Укажите, что исправить');
+      st.decided = true;
+      return json(200, card({ status: 'draft', my_action: 'returned', my_decision_at: T(TODAY, '10:20') }));
+    }
+    if (p === '/orgs/org_test/reports/plan-fact' && st.noPlan) return json(200, { updated_at: T(TODAY, '10:15'), month: '2026-10', title: 'Октябрь 2026', has_plan: false, income: [{ article: 'Оплата от покупателей', plan: null, fact: 68750000 }], expense: [{ article: 'Аренда', plan: null, fact: 1900000 }, { article: 'Связь', plan: null, fact: 50000 }] });
     if (p === '/orgs/org_test/reports/cash-flow') return json(200, { updated_at: T(TODAY, '10:15'), month: '2026-10', title: 'Октябрь 2026', inflow: 24000000, outflow: 21650000, weeks: [{ label: '1–4', from: '2026-10-01', to: '2026-10-04', inflow: 9800000, outflow: 8450000 }, { label: '5–11', from: '2026-10-05', to: '2026-10-11', inflow: 14200000, outflow: 13200000 }] });
     if (p === '/orgs/org_test/reports/plan-fact') return json(200, { updated_at: T(TODAY, '10:15'), month: '2026-10', title: 'Октябрь 2026', has_plan: true, income: [{ article: 'Оплата от покупателей', plan: 72000000, fact: 68750000 }], expense: [{ article: 'Аренда', plan: 1800000, fact: 1900000 }, { article: 'Связь', plan: null, fact: 50000 }] });
     if (p === '/orgs/org_test/reports/debtors') return json(200, { updated_at: T(TODAY, '10:15'), date: TODAY, total: 3000000, aging: { days_0_30: 2000000, days_31_60: 500000, days_over_60: 500000 }, items: [{ counterparty: 'ТОО «Должник»', amount: 1200000, aging: { days_0_30: 200000, days_31_60: 500000, days_over_60: 500000 }, oldest_days: 74 }] });
@@ -540,16 +546,34 @@ const PUSH_STUB = () => {
       await settle(page, 600);
       const put = ctl.calls.find((c) => c.method === 'PUT' && c.path === '/me/settings');
       ok(put && JSON.stringify(put.body) === JSON.stringify({ notifications: { payments: { enabled: false } } }), 'PUT /me/settings — только изменённый enabled');
-      await page.locator('[data-act="toggle"][data-k="whatsapp"]').click();
-      await settle(page, 600);
-      ok((await page.locator('[data-act="toggle"][data-k="whatsapp"]').getAttribute('aria-checked')) === 'false', 'whatsapp (editable: false) не меняется');
+      const wa = page.locator('.li-locked[data-k="whatsapp"]');
+      ok(norm(await wa.innerText()).includes('Настраивает администратор') && (await wa.getAttribute('aria-disabled')) === 'true', 'whatsapp (editable: false) — неактивный, «Настраивает администратор»');
+      await wa.dispatchEvent('click');
+      await settle(page, 500);
+      ok((await wa.getAttribute('aria-checked')) === 'false', 'нажатие на whatsapp ничего не меняет');
       ok(!ctl.calls.some((c) => c.method === 'PUT' && c.body && c.body.notifications && c.body.notifications.whatsapp), 'запрос на whatsapp не отправлен');
+      const prof = norm(await page.locator('.screen:not(.leaving) .scroll').innerText());
+      ok(prof.includes('Каждый день в 08:30') && prof.includes('Оплаты от 500 000 ₸') && prof.includes('За 3 дня до разрыва'), 'подписи настроек — из time, min_amount, days_ahead');
+      await page.evaluate(() => { const s = document.querySelector('.screen:not(.leaving) .scroll'); s.scrollTop = s.scrollHeight; });
+      await settle(page, 300);
+      await shot(page, '10-profil-nastroyki');
       await page.evaluate(() => { location.hash = '#/reports/debtors'; });
       await settle(page, 900);
-      ok(norm(await page.locator('.rep-body').innerText()).includes('ТОО «Должник»'), 'должники из GET /reports/debtors');
+      const dt = norm(await page.locator('.rep-body').innerText());
+      ok(dt.includes('ТОО «Должник»') && dt.includes('> 60 дней: 500 000 ₸') && dt.includes('старейший документ — 74 дня'), 'должники: возраст долга, oldest_days');
+      ok(!/просроч/i.test(dt), 'должники: без «просрочки»');
+      await shot(page, '11-dolzhniki-vozrast');
       await page.evaluate(() => { location.hash = '#/reports/plan'; });
       await settle(page, 900);
-      ok(norm(await page.locator('.rep-body').innerText()).includes('Аренда'), 'план-факт из GET /reports/plan-fact');
+      const pf = norm(await page.locator('.rep-body').innerText());
+      ok(pf.includes('Аренда') && pf.includes('Связь') && pf.includes('плана нет'), 'план-факт; статья с plan: null — «плана нет»');
+      ctl.state.noPlan = true;
+      await page.reload(); // отчёты кэшируются на экране 60 с; после перезагрузки сессия поднимается по refresh-токену
+      await settle(page, 1200);
+      ok((await page.evaluate(() => location.hash)) === '#/reports/plan', 'после перезагрузки — тот же экран, без повторного входа');
+      const np = norm(await page.locator('.rep-body').innerText());
+      ok(np.includes('Бюджет на месяц не задан') && !np.includes('0%'), 'has_plan: false — «Бюджет на месяц не задан», без плана 0');
+      await shot(page, '12-plan-ne-zadan');
       await page.evaluate(() => { location.hash = '#/notifications'; });
       await settle(page, 900);
       const nl = ctl.calls.find((c) => c.path === '/notifications' && c.query.org_id === 'org_test');
@@ -561,11 +585,69 @@ const PUSH_STUB = () => {
       ok(rd && JSON.stringify(rd.body) === JSON.stringify({ ids: ['n_1'] }), 'POST /notifications/read {ids}');
       await page.evaluate(() => { location.hash = '#/profile'; });
       await settle(page, 800);
+      await page.locator('[data-act="logout-all"]').click();
+      await settle(page, 500);
+      ok(norm(await page.locator('.sheet').innerText()).includes('Выйти со всех устройств?'), '«Выйти со всех устройств» — подтверждение');
+      await shot(page, '13-vyhod-vezde');
+      await page.locator('.sheet [data-act="sheet-close"]').click();
+      await settle(page, 400);
+      ok(!ctl.calls.some((c) => c.path === '/auth/logout-all'), '«Отмена» — запроса нет');
       await page.locator('[data-act="logout"]').click();
       await settle(page, 900);
       const lo = ctl.calls.find((c) => c.path === '/auth/logout');
-      ok(lo && lo.body.refresh_token === 'rt_1', 'POST /auth/logout с refresh_token');
+      ok(lo && lo.body.refresh_token === ctl.state.refresh, 'POST /auth/logout с текущим refresh_token');
       ok((await page.evaluate(() => location.hash)) === '#/login' && !(await page.evaluate(() => localStorage.getItem('finpuls-session'))), 'выход → вход, токены удалены');
+      noErrors(errors);
+      await ctx.close();
+    }
+
+    console.log('\n▶ На доработку и выход со всех устройств');
+    {
+      const { ctx, page, errors, ctl } = await newCtx();
+      await page.goto(BASE);
+      await settle(page, 800);
+      await login(page);
+      await page.evaluate(() => { location.hash = '#/requests/req_1'; });
+      await settle(page, 800);
+      await page.locator('.screen:not(.leaving) [data-act="return"]').click();
+      await settle(page, 400);
+      await page.locator('.sheet [data-act="return-confirm"]').click();
+      await settle(page, 600);
+      ok(await page.locator('#reject-err').isVisible() && !ctl.calls.some((c) => c.path.endsWith('/return')), 'без комментария — не отправляется');
+      await page.locator('.sheet #reject-text').fill('Уточните сумму: в счёте 2 250 000');
+      await page.locator('.sheet [data-act="return-confirm"]').click();
+      await page.waitForSelector('.done-overlay.show', { timeout: 5000 });
+      const rt = ctl.calls.find((c) => c.path.endsWith('/return'));
+      ok(rt && rt.method === 'POST' && rt.body.comment === 'Уточните сумму: в счёте 2 250 000' && rt.headers['idempotency-key'], 'POST …/return с комментарием и Idempotency-Key');
+      ok(norm(await page.locator('.done-title').innerText()) === 'Возвращена на доработку', '«Возвращена на доработку»');
+      await page.waitForFunction(() => location.hash === '#/requests');
+      await settle(page, 1300);
+      await page.evaluate(() => { location.hash = '#/profile'; });
+      await settle(page, 900);
+      await page.locator('[data-act="logout-all"]').click();
+      await settle(page, 400);
+      await page.locator('.sheet [data-act="logout-all-confirm"]').click();
+      await settle(page, 1000);
+      ok(ctl.calls.some((c) => c.path === '/auth/logout-all' && c.method === 'POST'), 'POST /auth/logout-all');
+      ok((await page.evaluate(() => location.hash)) === '#/login' && !(await page.evaluate(() => localStorage.getItem('finpuls-session'))), 'выход везде → вход, токены удалены');
+      ok(norm(await page.locator('.toast').innerText()).includes('Вы вышли на всех устройствах'), '«Вы вышли на всех устройствах»');
+      noErrors(errors);
+      await ctx.close();
+    }
+
+    console.log('\n▶ Push без входа: после входа — заявка, а не главная');
+    {
+      const { ctx, page, errors, ctl } = await newCtx(devices['iPhone 13'], { orgs: [ORG, ORG2] });
+      await page.goto(`${BASE}#/requests/req_1?org=org_test&n=n_5`);
+      await settle(page, 900);
+      ok((await page.evaluate(() => location.hash)) === '#/login', 'без входа — экран входа');
+      await login(page, { expect: '#/requests/req_1' });
+      ok((await page.evaluate(() => location.hash)) === '#/requests/req_1', 'после входа открылась заявка из push (организаций две — выбор пропущен)');
+      ok(norm(await page.locator('.screen:not(.leaving)').innerText()).includes('Заявка № 901'), 'карточка заявки на экране');
+      ok(ctl.calls.some((c) => c.path === '/notifications/read' && c.body && c.body.ids && c.body.ids[0] === 'n_5'), 'уведомление из push отмечено прочитанным');
+      await page.evaluate(() => { location.hash = '#/home'; });
+      await settle(page, 800);
+      ok((await page.locator('.org-pill-name').innerText()) === 'Тест', 'выбрана организация из push');
       noErrors(errors);
       await ctx.close();
     }

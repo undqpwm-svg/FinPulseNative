@@ -876,3 +876,47 @@ html.framed .loadbar { top: 50px; left: 24px; right: 24px; }
 .toast-error { background: var(--neg); }
 .toast-error .ic, .toast-info .ic { color: #fff; }
 .toast { line-height: 1.35; }
+
+/* ---------- долг по возрасту ---------- */
+.age-title { display: block; margin: 10px 0 8px; font-size: 13px; font-weight: 600; color: var(--stone); }
+.age-bar { display: flex; height: 10px; border-radius: 6px; overflow: hidden; background: var(--track); }
+.age-bar i { display: block; height: 100%; transform-origin: left; animation: growX 0.7s var(--ease) both; }
+.age-bar i + i { box-shadow: -1.5px 0 0 var(--card); }
+.age-bar .a0 { background: #cfc8b9; }
+.age-bar .a1 { background: #f2a68b; }
+.age-bar .a2 { background: var(--neg); }
+.age-bar-sm { height: 6px; margin: 8px 0; border-radius: 4px; }
+.sw-a0 { background: #cfc8b9; }
+.sw-a1 { background: #f2a68b; }
+.sw-a2 { background: var(--neg); }
+.age-legend { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 10px; }
+.age-legend > span { display: flex; flex-direction: column; min-width: 0; }
+.age-legend small { display: inline-flex; align-items: center; font-size: 12px; color: var(--stone); white-space: nowrap; }
+.age-legend b { margin-top: 2px; font: 600 14.5px/1.2 var(--f-head); white-space: nowrap; }
+.age-note { display: flex; gap: 6px; align-items: flex-start; margin-top: 12px; font-size: 12px; color: var(--stone-2); line-height: 1.4; }
+.age-note .ic { width: 14px; height: 14px; margin-top: 1px; }
+
+/* ---------- решение: три действия ---------- */
+.actionbar.ab-3 { grid-template-columns: 1fr 1fr; row-gap: 8px; }
+.actionbar.ab-3 .ab-main { grid-column: 1 / -1; }
+.btn-sm { height: 46px; font-size: 15px; border-radius: 15px; }
+#app .scroll.has-actionbar.ab-3-pad { padding-bottom: calc(var(--sab) + 160px); }
+.btn-dark { background: var(--ink); color: var(--milk); }
+.returned .done-ring { fill: var(--lav); }
+.returned .done-mark { stroke: var(--ink); stroke-dasharray: 140; stroke-dashoffset: 140; }
+
+/* ---------- профиль: переключатель, который настраивает администратор ---------- */
+.li-locked { cursor: default; }
+.li-locked .li-main b { color: var(--stone); }
+.switch.locked { opacity: 0.45; }
+.switch.locked.on { background: var(--stone); }
+
+/* ---------- план-факт без бюджета ---------- */
+.noplan-note { display: flex; gap: 12px; align-items: flex-start; padding: 14px 16px; border-radius: var(--r-card); background: var(--lav); }
+.noplan-note b { display: block; font: 600 16px/1.25 var(--f-head); }
+.noplan-note div span { display: block; margin-top: 3px; font-size: 13.5px; color: var(--ink-2); line-height: 1.4; }
+.noplan-ic { width: 38px; height: 38px; border-radius: 50%; display: grid; place-items: center; flex-shrink: 0; background: rgba(255, 255, 255, 0.6); }
+.noplan-ic .ic { width: 19px; height: 19px; }
+.pf.noplan .pf-top b { font-family: var(--f-head); }
+.li-note { display: inline-flex; align-items: center; gap: 4px; margin-top: 3px; font-size: 12px; font-weight: 600; color: var(--stone); }
+.li-note .ic { width: 13px; height: 13px; }

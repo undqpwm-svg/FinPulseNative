@@ -138,6 +138,8 @@ async function runFlow(browser, name, opts, isPhone) {
   ok((await homeCount(page)) === 'На согласовании: 3', 'плашка «На согласовании: 3»');
   ok((await tabBadge(page)) === '3', 'бейдж 3 на вкладке «Заявки»');
   await noHScroll(page, 'Главная');
+  const homeRec = await page.locator('.screen:not(.leaving) .rec-card').innerText().then(norm);
+  ok(homeRec.includes('Долг по возрасту') && homeRec.includes('> 60 дней') && !/просроч|в срок/i.test(homeRec), 'главная: долг по возрасту, без «просрочено»');
   if (isPhone) await shot(page, '04-glavnaya');
   await scrollTo(page, '.card');
   if (isPhone) await shot(page, '05-glavnaya-7-dney-i-debitorka');
@@ -255,6 +257,33 @@ async function runFlow(browser, name, opts, isPhone) {
   await settle(page);
   ok((await page.locator('.screen:not(.leaving) .day-card').innerText().then(norm)).includes('по заявке'), 'согласованный платёж встал в календарь');
 
+  // --- на доработку ---
+  await page.evaluate(() => { location.hash = '#/requests/r103'; });
+  await settle(page);
+  ok(await page.locator('.screen:not(.leaving) .actionbar [data-act="return"]').isVisible(), 'в карточке есть «На доработку»');
+  if (isPhone) await shot(page, '26-zayavka-tri-deystviya');
+  await tap(page, '[data-act="return"]');
+  await settle(page, 450);
+  await tap(page, '[data-act="return-confirm"]');
+  await settle(page, 600);
+  ok(await page.locator('#reject-err').isVisible(), 'без комментария вернуть на доработку нельзя');
+  await tap(page, '.chip[data-v="Уточните сумму"]');
+  await settle(page, 400);
+  if (isPhone) await shot(page, '27-na-dorabotku');
+  await tap(page, '[data-act="return-confirm"]');
+  await page.waitForSelector('.done-overlay.show');
+  await settle(page, 750);
+  ok((await page.locator('.done-title').innerText().then(norm)) === 'Возвращена на доработку', 'анимация «Возвращена на доработку»');
+  if (isPhone) await shot(page, '28-vozvrashchena');
+  await page.waitForFunction(() => location.hash === '#/requests');
+  await settle(page, 1300);
+  ok(await page.locator('.screen:not(.leaving) .req-card').count() === 0, 'заявка ушла из списка — все решены');
+  await tap(page, '[data-act="req-tab"][data-v="done"]');
+  await settle(page, 300);
+  ok((await page.locator('.screen:not(.leaving) .req-list').innerText().then(norm)).includes('На доработке'), 'в «Решённых» — метка «На доработке»');
+  await tap(page, '[data-act="req-tab"][data-v="pending"]');
+  await settle(page, 200);
+
   // --- отчёты ---
   await tab(page, '#/reports');
   await settle(page);
@@ -273,6 +302,9 @@ async function runFlow(browser, name, opts, isPhone) {
   await tap(page, '.seg-btn[data-go="#/reports/debtors"]');
   await settle(page, 300);
   ok(await page.locator('.screen:not(.leaving) .debt').count() === 5, 'топ-5 должников');
+  const debtText = await page.locator('.screen:not(.leaving) .rep-body').innerText().then(norm);
+  ok(debtText.includes('Долг по возрасту') && debtText.includes('0–30 дней') && debtText.includes('31–60 дней') && debtText.includes('> 60 дней'), 'должники: долг по возрасту 0–30 / 31–60 / > 60 дней');
+  ok(!/просроч/i.test(debtText), 'должники: нет слов «просрочено» и «просрочка»');
   await noHScroll(page, 'Отчёты, должники');
   if (isPhone) await shot(page, '21-otchet-dolzhniki');
 
@@ -309,6 +341,18 @@ async function runFlow(browser, name, opts, isPhone) {
   await page.evaluate(() => { document.querySelector('.screen:not(.leaving) .scroll').scrollTop = 0; });
   await settle(page, 300);
   if (isPhone) await shot(page, '24-profil');
+  const wa = page.locator('.screen:not(.leaving) .li-locked[data-k="whatsapp"]');
+  ok((await wa.innerText().then(norm)).includes('Настраивает администратор'), 'WhatsApp — неактивный, «Настраивает администратор»');
+  ok(await page.locator('.screen:not(.leaving) [data-act="logout-all"]').count() === 1, 'в профиле есть «Выйти со всех устройств»');
+  await page.evaluate(() => { const s = document.querySelector('.screen:not(.leaving) .scroll'); s.scrollTop = s.scrollHeight; });
+  await settle(page, 300);
+  if (isPhone) await shot(page, '29-profil-vyhod-vezde');
+  await tap(page, '[data-act="logout-all"]');
+  await settle(page, 450);
+  ok((await page.locator('.sheet').innerText().then(norm)).includes('Выйти со всех устройств?'), '«Выйти со всех устройств» — с подтверждением');
+  if (isPhone) await shot(page, '30-vyhod-vezde-podtverzhdenie');
+  await tap(page, '[data-act="sheet-close"].btn');
+  await settle(page, 400);
   await tap(page, '[data-act="switch-org"][data-id="sever"]');
   await settle(page, 300);
   await tab(page, '#/home');

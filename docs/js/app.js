@@ -1,7 +1,7 @@
 // Точка входа: роутер на хешах, асинхронная загрузка экранов, ошибки без белого экрана, переходы, нижняя навигация.
 import { CONFIG } from './config.js';
 import { api, setMode, ApiError } from './api/index.js';
-import { views, actions, errorView, onUnauthorized, invalidate } from './screens.js';
+import { views, actions, errorView, onUnauthorized, invalidate, rememberLink } from './screens.js';
 import { nav, navigate, back, closeSheet, sheetOpen, histIdx, loading } from './ui.js';
 import { I, logoMark } from './icons.js';
 import { syncPush } from './push.js';
@@ -92,6 +92,8 @@ async function route() {
     if (qNote) api.markRead(api.orgId(), qNote).catch(() => {});
     replaceHash(location.hash.split('?')[0]);
   }
+  // Ссылка на заявку без входа (нажали на push, сессии нет) — запомнить и открыть после входа.
+  if (!api.session() && r.name === 'requests' && r.params[0]) rememberLink(location.hash);
   const redirect = guard(r);
   if (redirect) {
     replaceHash(redirect);

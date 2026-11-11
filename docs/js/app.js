@@ -4,6 +4,7 @@ import { api, setMode, ApiError } from './api/index.js';
 import { views, actions, errorView, onUnauthorized, invalidate } from './screens.js';
 import { nav, navigate, back, closeSheet, sheetOpen, histIdx, loading } from './ui.js';
 import { I, logoMark } from './icons.js';
+import { syncPush } from './push.js';
 
 const app = document.getElementById('app');
 const screens = app.querySelector('.screens');
@@ -79,14 +80,16 @@ async function route() {
     replaceHash(api.session() ? '#/home' : '#/login');
     r = parse();
   }
-  // ?org=… — из push: открыть заявку нужной организации.
+  // ?org=…&n=… — из push: открыть заявку нужной организации и отметить уведомление прочитанным (контракт, 9.3).
   const qOrg = r.query.get('org');
-  if (qOrg && api.session()) {
-    if (api.orgId() !== qOrg) {
+  const qNote = r.query.get('n');
+  if ((qOrg || qNote) && api.session()) {
+    if (qOrg && api.orgId() !== qOrg) {
       api.setOrgId(qOrg);
       invalidate();
       nav.badge = null;
     }
+    if (qNote) api.markRead(api.orgId(), qNote).catch(() => {});
     replaceHash(location.hash.split('?')[0]);
   }
   const redirect = guard(r);
@@ -110,10 +113,10 @@ async function route() {
   try {
     v = await views[r.name](r.params);
   } catch (e) {
-    if (e instanceof ApiError && e.code === 'unauthorized') {
+    if (e instanceof ApiError && (e.code === 'unauthorized' || e.code === 'access_revoked')) {
       clearTimeout(timer);
       loading(false);
-      if (my === seq) onUnauthorized();
+      if (my === seq) onUnauthorized(e);
       return;
     }
     if (!(e instanceof ApiError)) console.error(e); // ожидаемые ошибки API показываем на экране, не в консоли
@@ -278,7 +281,10 @@ setInterval(tick, 20000);
 window.addEventListener('popstate', onHistory);
 window.addEventListener('hashchange', onHistory);
 if (!history.state) history.replaceState({ idx: 0 }, '', location.hash || '#/');
-route().finally(() => document.documentElement.classList.add('ready'));
+route().finally(() => {
+  document.documentElement.classList.add('ready');
+  if (api.session()) syncPush(); // контракт, 9.1: актуальная подписка при каждом запуске
+});
 
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
   window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(() => {}));

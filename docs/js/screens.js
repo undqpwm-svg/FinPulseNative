@@ -84,6 +84,10 @@ export function errorText(e) {
     not_found: ['Не найдено', 'Возможно, объект удалён или относится к другой организации.'],
     rate_limited: ['Слишком много запросов', 'Подождите минуту и обновите.'],
     not_supported: ['Пока недоступно', 'Эта функция появится после подключения к серверу.'],
+    too_many_requests: ['Слишком много запросов', 'Подождите минуту и обновите.'],
+    maintenance: ['Технические работы', 'Сервер на обслуживании. Повторите чуть позже.'],
+    app_outdated: ['Обновите приложение', 'Версия устарела: обновите страницу или переустановите приложение с экрана «Домой».'],
+    access_revoked: ['Доступ выключен', 'Обратитесь к администратору ФинПульса в своей компании.'],
   };
   const [title, text] = map[code] || ['Не удалось загрузить', 'Попробуйте обновить. Если не помогает — напишите в SmartSol.'];
   return { code, title, text };
@@ -119,17 +123,25 @@ actions.retry = () => {
 };
 
 // Сессия истекла или отозвана: стираем и — на вход.
-export function onUnauthorized() {
+export function onUnauthorized(e) {
   invalidate();
   ui.otp = null;
   nav.badge = null;
+  // Доступ выключил администратор (403 access_revoked) — показать его текст на экране входа.
+  if (e instanceof ApiError && e.code === 'access_revoked') {
+    ui.loginNotice = e.message || 'Доступ к приложению выключен. Обратитесь к администратору ФинПульса в своей компании.';
+    replace('#/login', 'fade');
+    return;
+  }
   replace('#/login', 'fade');
   setTimeout(() => toast('Сессия истекла — войдите снова', 'info'), 50);
 }
 
+const isSessionEnd = (e) => e instanceof ApiError && (e.code === 'unauthorized' || e.code === 'access_revoked');
+
 // Общая обработка ошибок действий (не загрузки экрана).
 function actionError(e) {
-  if (e instanceof ApiError && e.code === 'unauthorized') return onUnauthorized();
+  if (isSessionEnd(e)) return onUnauthorized(e);
   const t = errorText(e);
   toast(`${t.title}. ${t.text}`, 'error');
 }
@@ -147,10 +159,22 @@ function minutesText(sec) {
   return `${m} ${plural(m, ['минуту', 'минуты', 'минут'])}`;
 }
 
+function secondsText(sec) {
+  const s = Math.max(1, Math.ceil(sec));
+  return s >= 60 ? minutesText(s) : `${s} ${plural(s, ['секунду', 'секунды', 'секунд'])}`;
+}
+
 function loginErrorText(e) {
   const c = e instanceof ApiError ? e.code : '';
+  const raw = (e && e.details && e.details.contractCode) || c;
+  if (raw === 'resend_too_early') return `Код уже отправлен. Новый можно запросить через ${secondsText(e.retryAfter || 60)}.`;
+  if (raw === 'phone_blocked') return `Номер заблокирован после 5 неверных кодов. Повторите через ${minutesText(e.retryAfter || 900)}.`;
+  if (raw === 'too_many_requests') return `На этот номер уже отправлено 5 кодов за час. Повторите через ${minutesText(e.retryAfter || 3600)}.`;
   if (c === 'rate_limited' || c === 'too_many_attempts') return `Слишком много запросов кода. Повторите через ${minutesText(e.retryAfter || 600)}.`;
-  if (c === 'invalid_phone') return 'Проверьте номер: 10 цифр после +7.';
+  if (c === 'access_revoked') return e.message || 'Доступ к приложению выключен. Обратитесь к администратору ФинПульса в своей компании.';
+  if (c === 'invalid_phone' || c === 'validation_error') return 'Проверьте номер: 10 цифр после +7.';
+  if (c === 'upstream_unavailable') return 'Нет связи с учётом компании. Повторите через минуту.';
+  if (c === 'app_outdated') return 'Версия приложения устарела — обновите страницу.';
   if (c === 'network' || c === 'timeout' || c === 'server_unavailable') return 'Нет связи с сервером. Проверьте интернет и повторите.';
   return 'Не удалось отправить код. Повторите через минуту.';
 }
@@ -190,6 +214,11 @@ views.login = async () => {
       const input = el.querySelector('#phone');
       const btn = el.querySelector('[data-submit]');
       const err = el.querySelector('#login-err');
+      if (ui.loginNotice) {
+        err.hidden = false;
+        err.innerHTML = `${I.alert}<span>${H(ui.loginNotice)}</span>`;
+        ui.loginNotice = null;
+      }
       input.addEventListener('input', () => {
         let d = input.value.replace(/\D/g, '');
         if (d.length > 10 && (d[0] === '7' || d[0] === '8')) d = d.slice(1);
@@ -318,9 +347,20 @@ views.code = async () => {
             showErr('Код истёк — запросите новый', { shake: false });
             setResend(0);
           } else if (c === 'too_many_attempts' || c === 'rate_limited') {
-            showErr(`Слишком много попыток. Запросите новый код${e.retryAfter ? ` через ${minutesText(e.retryAfter)}` : ''}`, { shake: false });
+            showErr(e.details && e.details.contractCode === 'phone_blocked'
+              ? `Слишком много попыток: номер заблокирован на ${minutesText(e.retryAfter || 900)}`
+              : `Слишком много попыток. Запросите новый код${e.retryAfter ? ` через ${minutesText(e.retryAfter)}` : ''}`, { shake: false });
             input.disabled = true;
             setResend(e.retryAfter || 0);
+          } else if (c === 'access_revoked') {
+            ui.otp = null;
+            ui.loginNotice = e.message || 'Доступ к приложению выключен. Обратитесь к администратору ФинПульса в своей компании.';
+            replace('#/login', 'pop');
+          } else if (c === 'upstream_unavailable') {
+            const left = Math.max(1, Math.ceil(((otp.expiresIn || 300) * 1000 - (Date.now() - otp.sentAt)) / 60000));
+            showErr(`Нет связи с учётом компании. Код действует ещё ${left} мин. <button class="link-btn" data-act="code-retry">Повторить</button>`, { shake: false, clear: false });
+            ui.retryVerify = verify;
+            locked = false;
           } else {
             const t = errorText(e);
             showErr(`${t.title}. <button class="link-btn" data-act="code-retry">Повторить</button>`, { shake: false, clear: false });
@@ -385,7 +425,7 @@ views.orgs = async () => {
       <div class="oc-stats">
         <div><span>Деньги</span><b>${s.money == null ? '—' : moneyShort(s.money)}</b></div>
         <div><span>Заявки</span><b>${s.pending ?? '—'}</b></div>
-        <div><span>Разрыв</span>${s.gap ? `<b class="neg">${wdAcc(D(s.gap.date)).replace(/^во? /, '')}</b>` : '<b class="pos">нет</b>'}</div>
+        <div><span>Разрыв</span>${s.gap ? `<b class="neg">${wdAcc(D(s.gap.date)).replace(/^во? /, '')}</b>` : s.money == null ? '<b>—</b>' : '<b class="pos">нет</b>'}</div>
       </div>
     </button>`;
   }).join('');
@@ -853,8 +893,8 @@ actions['req-tab'] = (t) => {
 };
 
 function routeStep(s, today) {
-  const label = { created: 'Заявка создана', approved: 'Согласовано', rejected: 'Отклонено', returned: 'Возвращено на доработку', pending: 'Ждёт решения' }[s.status] || s.status;
-  const ic = { created: I.file, approved: I.check, rejected: I.x, returned: I.refresh, pending: I.clock }[s.status] || I.clock;
+  const label = { created: 'Заявка создана', approved: 'Согласовано', rejected: 'Отклонено', returned: 'Возвращено на доработку', pending: 'Ждёт решения', waiting: 'Ещё не дошла очередь', skipped: 'Этап пропущен' }[s.status] || s.status;
+  const ic = { created: I.file, approved: I.check, rejected: I.x, returned: I.refresh, pending: I.clock, waiting: I.clock, skipped: I.chevR }[s.status] || I.clock;
   return `<li class="rt rt-${H(s.status)}">
     <span class="rt-dot">${ic}</span>
     <div class="rt-body">
@@ -1130,9 +1170,9 @@ async function submitDecision(kind, comment, btn) {
     res = await api.decide(api.orgId(), r.id, { decision: kind, comment, idempotencyKey: ui.decision.key });
   } catch (e) {
     ui.busy = false;
-    if (e instanceof ApiError && e.code === 'unauthorized') {
+    if (isSessionEnd(e)) {
       await closeSheet(true);
-      onUnauthorized();
+      onUnauthorized(e);
       return;
     }
     showDecisionError(e, r);
@@ -1193,6 +1233,11 @@ function showDecisionError(e, r) {
     title = 'Решение уже принято';
     text = `Заявка уже ${what}${det.by ? `: ${H(det.by)}` : ''}${det.at ? `, ${stampAt(det.at, r.today)}` : ''}. Ваше решение не отправлено.`;
     buttons = '<button class="btn btn-primary btn-block" data-act="decision-to-list">К списку заявок</button>';
+  } else if (c === 'action_failed') {
+    title = 'Учёт не принял решение';
+    text = `${H(e.message || 'Причина не указана.')} Заявка осталась в прежнем состоянии.`;
+    buttons = `<button class="btn btn-primary btn-block" data-act="decision-refresh">Обновить заявку</button>
+      <button class="btn btn-text btn-block" data-act="sheet-close">Закрыть</button>`;
   } else if (c === 'forbidden') {
     icon = I.shield;
     title = 'Нет прав на это решение';

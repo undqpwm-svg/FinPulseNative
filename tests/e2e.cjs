@@ -50,7 +50,10 @@ async function newPage(browser, opts) {
   const page = await ctx.newPage();
   await page.clock.setFixedTime(FIXED);
   const errors = [];
-  page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
+  // Сервер-посредник ещё не развёрнут: при запуске приложение спрашивает GET /version (контракт, 3.1) — отвечаем
+  // «недоступен». Этот отказ ожидаем, остальные ошибки консоли — нет.
+  await page.route(/^https:\/\/api(-test)?\.smartsol\.pro\//, (r) => r.abort('failed'));
+  page.on('console', (m) => { if (m.type() === 'error' && !/net::ERR_FAILED/.test(m.text())) errors.push(m.text()); });
   page.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`));
   page.on('response', (r) => { if (r.status() >= 400) errors.push(`HTTP ${r.status()} ${r.url()}`); });
   return { ctx, page, errors };

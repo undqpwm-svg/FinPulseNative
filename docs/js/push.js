@@ -39,10 +39,21 @@ function keyToUint8(base64url) {
   return Uint8Array.from([...raw].map((c) => c.charCodeAt(0)));
 }
 
+// Для подписки: дождаться активного service worker (не дольше 4 с).
 async function registration() {
   if (!('serviceWorker' in navigator)) return null;
   const reg = await Promise.race([navigator.serviceWorker.ready, new Promise((r) => setTimeout(() => r(null), 4000))]);
   return reg;
+}
+
+// Для выхода и синхронизации: уже зарегистрированный service worker, без ожидания.
+async function existing() {
+  if (!('serviceWorker' in navigator) || !navigator.serviceWorker.getRegistration) return null;
+  try {
+    return (await navigator.serviceWorker.getRegistration()) || null;
+  } catch (e) {
+    return null;
+  }
 }
 
 // Включить уведомления. Вызывать только из нажатия пользователя (иначе браузер не покажет запрос).
@@ -72,7 +83,7 @@ export async function enablePush() {
 export async function syncPush() {
   if (isDemo() || pushState() !== 'granted') return;
   try {
-    const reg = await registration();
+    const reg = await existing();
     const sub = reg && (await reg.pushManager.getSubscription());
     if (sub) await api.savePushSubscription(sub.toJSON());
   } catch (e) {
@@ -83,7 +94,7 @@ export async function syncPush() {
 // При выходе: перестать получать push этого пользователя на этом устройстве.
 export async function disablePush() {
   try {
-    const reg = await registration();
+    const reg = await existing();
     const sub = reg && (await reg.pushManager.getSubscription());
     if (!sub) return;
     if (!isDemo()) await api.deletePushSubscription(sub.endpoint).catch(() => {});

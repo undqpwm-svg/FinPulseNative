@@ -1,88 +1,85 @@
-// Реализация API «сервер»: запросы к серверу-посреднику api.smartsol.pro, который берёт данные из 1С в момент запроса.
-// ВНИМАНИЕ: пути и форматы — предварительные, до утверждения контракта API (см. spec/api-client.md). Все места,
-// которые надо сверить с контрактом, помечены «КОНТРАКТ». Экраны ждут ответы в форме DTO из spec/api-client.md.
+// Реализация API «сервер» по контракту «ФинПульс: API приложения руководителя», v1 (проект от 11.11.2026).
+// Это переходник: запросы — как в контракте, ответы переводятся в DTO, которые ждут экраны (spec/api-client.md).
+// Экраны о контракте не знают: поменяется контракт — правится только этот файл.
 import { CONFIG } from '../config.js';
-import { ApiError, storage, e164, maskPhone } from './core.js';
+import { ApiError, storage, e164 } from './core.js';
 
+// ---------- сессия ----------
+// access-токен (15 мин) — только в памяти; refresh-токен (30 дней, одноразовый) — в хранилище браузера (контракт, 2).
+// Профиль пользователя хранится рядом, чтобы показать имя до первого запроса.
 const SESSION_KEY = 'finpuls-session';
 const ORG_KEY = 'finpuls-org-server';
+const DEVICE_KEY = 'finpuls-device';
 
-// КОНТРАКТ: пути эндпоинтов — в одном месте.
-const PATHS = {
-  otpRequest: '/auth/otp/request',
-  otpVerify: '/auth/otp/verify',
-  logout: '/auth/logout',
-  me: '/me',
-  settings: '/me/settings',
-  orgs: '/orgs',
-  home: (org) => `/orgs/${enc(org)}/home`,
-  accounts: (org) => `/orgs/${enc(org)}/accounts`,
-  calendar: (org) => `/orgs/${enc(org)}/calendar`,
-  requests: (org) => `/orgs/${enc(org)}/requests`,
-  request: (org, id) => `/orgs/${enc(org)}/requests/${enc(id)}`,
-  attachment: (org, id, att) => `/orgs/${enc(org)}/requests/${enc(id)}/attachments/${enc(att)}`,
-  decision: (org, id) => `/orgs/${enc(org)}/requests/${enc(id)}/decision`,
-  report: (org, kind) => `/orgs/${enc(org)}/reports/${enc(kind)}`,
-  notifications: (org) => `/orgs/${enc(org)}/notifications`,
-  notificationRead: (org, id) => `/orgs/${enc(org)}/notifications/${enc(id)}/read`,
-  notificationsReadAll: (org) => `/orgs/${enc(org)}/notifications/read-all`,
-  summary: (org) => `/orgs/${enc(org)}/summary`,
-  pushConfig: '/push/config',
-  pushSubscriptions: '/push/subscriptions',
-};
-const enc = encodeURIComponent;
+let access = null; // { token, expiresAt }
+let refreshing = null; // одно обновление на все запросы сразу (контракт, 2.3)
+let versionInfo = null; // ответ GET /version
+let orgsCache = null; // имена организаций для главной и счетов (сводка возвращает только org_id)
+const notEditable = new Set(); // переключатели настроек с editable: false
 
-// ---------- сессия: токен в памяти и в хранилище браузера (с try/catch внутри storage) ----------
-let session = null; // { token, expiresAt, user }
-
-function loadSession() {
-  if (session) return session;
+function stored() {
   const s = storage.getJSON(SESSION_KEY);
-  if (s && s.token && (!s.expiresAt || Date.parse(s.expiresAt) > Date.now())) session = s;
-  return session;
+  return s && s.refreshToken ? s : null;
 }
 
-function saveSession(s) {
-  session = s;
-  storage.setJSON(SESSION_KEY, s);
+function saveTokens(r, user) {
+  const prev = stored() || {};
+  access = { token: r.access_token, expiresAt: Date.now() + (Number(r.access_expires_in) || 900) * 1000 };
+  storage.setJSON(SESSION_KEY, {
+    refreshToken: r.refresh_token,
+    refreshExpiresAt: Date.now() + (Number(r.refresh_expires_in) || 2592000) * 1000,
+    user: user || prev.user || null,
+  });
 }
 
 export function clearSession() {
-  session = null;
+  access = null;
+  orgsCache = null;
   storage.remove(SESSION_KEY);
   storage.remove(ORG_KEY);
+  storage.remove(DEVICE_KEY);
 }
 
 // ---------- транспорт ----------
+// Коды контракта, у которых в приложении есть тот же смысл под другим именем.
+const CODE_MAP = {
+  source_unavailable: 'upstream_unavailable', // база 1С не отвечает
+  source_timeout: 'timeout', // база 1С не успела за 20 с
+  invalid_code: 'code_invalid',
+  phone_blocked: 'too_many_attempts', // экран кода: таймер и блокировка ввода
+  not_awaiting_you: 'forbidden', // решение: «заявка не на вашем этапе»
+  refresh_invalid: 'unauthorized',
+  internal_error: 'server_error',
+  bad_request: 'server_error',
+  idempotency_key_reused: 'server_error',
+  idempotency_key_required: 'server_error',
+};
+
 function codeByStatus(status) {
   if (status === 401) return 'unauthorized';
   if (status === 403) return 'forbidden';
   if (status === 404) return 'not_found';
-  if (status === 409) return 'already_decided';
-  if (status === 429) return 'rate_limited';
+  if (status === 429) return 'too_many_requests';
   if (status === 502 || status === 503 || status === 504) return 'server_unavailable';
   return 'server_error';
 }
 
-async function request(method, path, { body, auth = true, headers = {}, raw = false } = {}) {
-  const h = { Accept: raw ? '*/*' : 'application/json', ...headers };
-  if (body !== undefined) h['Content-Type'] = 'application/json';
-  if (auth) {
-    const s = loadSession();
-    if (!s) throw new ApiError('unauthorized');
-    h.Authorization = `Bearer ${s.token}`;
-  }
+const appHeaders = () => ({ 'X-App-Version': CONFIG.appVersion, 'X-App-Platform': 'web' });
+
+async function send(method, path, { body, token, headers = {} } = {}) {
+  const h = { Accept: 'application/json', ...appHeaders(), ...headers };
+  if (body !== undefined) h['Content-Type'] = 'application/json; charset=utf-8';
+  if (token) h.Authorization = `Bearer ${token}`;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), CONFIG.requestTimeoutMs);
-  let res;
   try {
-    res = await fetch(CONFIG.apiBase + path, {
+    return await fetch(CONFIG.apiBase + path, {
       method,
       headers: h,
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: ctrl.signal,
       cache: 'no-store',
-      credentials: 'omit', // КОНТРАКТ: если сервер выберет HttpOnly-cookie — 'include'
+      credentials: 'omit',
       mode: 'cors',
       referrerPolicy: 'no-referrer',
     });
@@ -91,114 +88,545 @@ async function request(method, path, { body, auth = true, headers = {}, raw = fa
   } finally {
     clearTimeout(timer);
   }
-  if (raw && res.ok) return res;
+}
+
+// Ошибка контракта (раздел 10): { error, message, details } → ApiError с кодом приложения.
+// Исходный код контракта сохраняется в details.contractCode, текст сервера — в message.
+async function toError(res) {
   let data = null;
-  const text = await res.text().catch(() => '');
-  if (text) {
-    try {
-      data = JSON.parse(text);
-    } catch (e) {
-      data = null;
+  try {
+    data = await res.json();
+  } catch (e) {
+    data = null;
+  }
+  const raw = (data && typeof data.error === 'string' && data.error) || codeByStatus(res.status);
+  const details = { ...((data && data.details) || {}), contractCode: raw };
+  const retryAfter = Number(details.retry_after) || Number(res.headers.get('Retry-After')) || 0;
+  if (details.attempts_left !== undefined) details.attemptsLeft = details.attempts_left;
+  return new ApiError(CODE_MAP[raw] || raw, (data && data.message) || '', details, res.status, retryAfter);
+}
+
+// Обновить пару токенов — одно обновление на все одновременные запросы.
+function refreshTokens() {
+  if (refreshing) return refreshing;
+  refreshing = (async () => {
+    const s = stored();
+    if (!s) throw new ApiError('unauthorized');
+    const res = await send('POST', '/auth/refresh', { body: { refresh_token: s.refreshToken } });
+    if (!res.ok) {
+      const e = await toError(res);
+      if (e.code === 'unauthorized' || e.code === 'access_revoked') clearSession();
+      throw e;
+    }
+    saveTokens(await res.json());
+  })();
+  return refreshing.finally(() => {
+    refreshing = null;
+  });
+}
+
+// Запрос с авторизацией: нет access-токена → обновить; 401 token_expired → обновить один раз и повторить.
+async function authed(method, path, opts = {}) {
+  if (!stored()) throw new ApiError('unauthorized');
+  if (!access || access.expiresAt - Date.now() < 15000) await refreshTokens();
+  let res = await send(method, path, { ...opts, token: access.token });
+  if (res.status === 401) {
+    const e = await toError(res.clone());
+    if (e.details.contractCode === 'token_expired') {
+      await refreshTokens();
+      res = await send(method, path, { ...opts, token: access.token });
     }
   }
-  if (res.ok) return data;
-  // КОНТРАКТ: ошибка — { "error": { "code": "…", "message": "…", "details": { … } } }
-  const err = (data && data.error) || {};
-  const code = err.code || codeByStatus(res.status);
-  const retryAfter = Number(res.headers.get('Retry-After')) || Number(err.details && err.details.retryAfter) || 0;
-  if (code === 'unauthorized') clearSession();
-  throw new ApiError(code, err.message || '', err.details || {}, res.status, retryAfter);
+  if (!res.ok) {
+    const e = await toError(res);
+    if (e.code === 'unauthorized' || e.code === 'access_revoked') clearSession();
+    throw e;
+  }
+  return res;
 }
 
-const get = (path) => request('GET', path);
+const getJSON = async (path) => (await authed('GET', path)).json();
+const enc = encodeURIComponent;
+const qs = (o) => Object.entries(o).filter(([, v]) => v !== undefined && v !== null && v !== '').map(([k, v]) => `${k}=${enc(v)}`).join('&');
 
-// ---------- вход ----------
-export async function init() {}
+// ---------- запуск: версия API, ключ Web Push ----------
+// Ошибка связи при запуске не мешает открыть вход; устаревшая версия приложения — мешает (426 app_outdated).
+export async function init() {
+  if (versionInfo) return;
+  try {
+    const res = await send('GET', '/version');
+    if (!res.ok) return;
+    versionInfo = await res.json();
+  } catch (e) {
+    return;
+  }
+  if (versionInfo && cmpVersion(CONFIG.appVersion, versionInfo.min_app_version) < 0) {
+    throw new ApiError('app_outdated', 'Версия приложения устарела — обновите страницу или переустановите приложение');
+  }
+}
+
+function cmpVersion(a = '0', b = '0') {
+  const pa = String(a).split('.').map(Number);
+  const pb = String(b).split('.').map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] || 0) - (pb[i] || 0);
+    if (d) return d;
+  }
+  return 0;
+}
+
+// ---------- вход (контракт, 2) ----------
+function userDto(u) {
+  if (!u) return null;
+  return { id: u.id, name: u.name, firstName: u.first_name, initials: u.initials, role: u.position || '', phone: formatPhone(u.phone) };
+}
+
+function formatPhone(p) {
+  const d = String(p || '').replace(/\D/g, '');
+  return d.length === 11 ? `+7 ${d.slice(1, 4)} ${d.slice(4, 7)} ${d.slice(7, 9)} ${d.slice(9)}` : p || '';
+}
 
 export function session_() {
-  return loadSession();
+  const s = stored();
+  return s ? { token: access && access.token, user: userDto(s.user) } : null;
 }
 
-// Код в WhatsApp отправляет сервер. Ответ одинаковый для подключённых и неподключённых номеров.
 export async function requestCode(digits10) {
-  const r = await request('POST', PATHS.otpRequest, { auth: false, body: { phone: e164(digits10) } });
+  const res = await send('POST', '/auth/code', { body: { phone: e164(digits10) } });
+  if (!res.ok) throw await toError(res);
+  const r = await res.json();
   return {
-    requestId: r && r.requestId,
-    codeLength: (r && r.codeLength) || 6,
-    expiresIn: (r && r.expiresIn) || 300,
-    resendIn: (r && r.resendIn) || 60,
-    phoneMasked: (r && r.phoneMasked) || maskPhone(digits10),
-    channel: (r && r.channel) || 'whatsapp',
+    requestId: r.challenge_id,
+    codeLength: r.code_length || 4,
+    expiresIn: r.expires_in || 300,
+    resendIn: r.resend_after || 60,
+    phoneMasked: formatPhone(e164(digits10)), // контракт, 2.1: «Отправили код в WhatsApp на +7 701 555 12 34»
+    channel: r.channel || 'whatsapp',
   };
 }
 
-export async function verifyCode({ requestId, digits10, code }) {
-  const r = await request('POST', PATHS.otpVerify, {
-    auth: false,
-    body: { requestId, phone: e164(digits10), code, device: { name: deviceName() } },
-  });
-  if (!r || !r.token) throw new ApiError('server_error', 'Сервер не выдал сессию');
-  saveSession({ token: r.token, expiresAt: r.expiresAt || null, user: r.user || null });
-  return session;
+export async function verifyCode({ requestId, code }) {
+  const res = await send('POST', '/auth/token', { body: { challenge_id: requestId, code } });
+  if (!res.ok) throw await toError(res);
+  const r = await res.json();
+  if (!r.access_token || !r.refresh_token) throw new ApiError('server_error', 'Сервер не выдал сессию');
+  orgsCache = null;
+  saveTokens(r, r.user);
+  return session_();
 }
 
 export async function logout() {
+  const s = stored();
   try {
-    if (loadSession()) await request('POST', PATHS.logout);
+    if (s) await authed('POST', '/auth/logout', { body: { refresh_token: s.refreshToken } });
   } catch (e) {
     /* выходим в любом случае */
   }
   clearSession();
 }
 
-export async function me() {
-  const r = await get(PATHS.me);
-  if (session && r) saveSession({ ...session, user: r });
-  return r;
+// «Выйти со всех устройств» (контракт, 2.5). В интерфейсе пункта пока нет.
+export async function logoutAll() {
+  try {
+    await authed('POST', '/auth/logout-all', { body: {} });
+  } finally {
+    clearSession();
+  }
 }
 
-// ---------- выбранная организация ----------
+export async function me() {
+  const r = await getJSON('/me');
+  const s = stored();
+  if (s && r && r.user) storage.setJSON(SESSION_KEY, { ...s, user: r.user });
+  return userDto(r && r.user);
+}
+
+// ---------- организации (4.2) ----------
 export const orgId = () => storage.get(ORG_KEY);
 export const setOrgId = (id) => storage.set(ORG_KEY, id);
 
-// ---------- данные экранов (формы ответов — spec/api-client.md) ----------
-export const orgs = () => get(PATHS.orgs);
-export const home = (org) => get(PATHS.home(org));
-export const accounts = (org) => get(PATHS.accounts(org));
-export const calendar = (org) => get(PATHS.calendar(org));
-export const requests = (org, tab) => get(`${PATHS.requests(org)}?state=${tab === 'done' ? 'decided' : 'pending'}`);
-export const request_ = (org, id) => get(PATHS.request(org, id));
-export const report = (org, kind) => get(PATHS.report(org, kind));
-export const notifications = (org) => get(PATHS.notifications(org));
-export const markRead = (org, id) => request('POST', PATHS.notificationRead(org, id));
-export const markAllRead = (org) => request('POST', PATHS.notificationsReadAll(org));
-export const summary = (org) => get(PATHS.summary(org));
-export const settings = () => get(PATHS.settings);
-export const saveSettings = (patch) => request('PATCH', PATHS.settings, { body: patch });
+function orgDto(o) {
+  return {
+    id: o.id,
+    name: o.name,
+    short: o.short_name || o.name,
+    initials: o.initials,
+    city: null,
+    // в v1 city и activity — null; строку под названием используем для «Нет связи с 1С» (available: false)
+    activity: o.available === false ? 'нет связи с 1С' : null,
+    available: o.available !== false,
+    summary: {
+      money: o.money_total,
+      pending: o.pending_requests,
+      gap: o.gap ? { date: o.gap.date, deficit: o.gap.shortage } : null,
+    },
+  };
+}
 
-// Вложение: PDF отдаётся с авторизацией — получаем как Blob и открываем по object URL.
-export async function attachment(org, id, att) {
-  const res = await request('GET', PATHS.attachment(org, id, att), { raw: true });
+export async function orgs() {
+  const r = await getJSON('/orgs'); // список перечитываем при каждом открытии экрана (4.2)
+  orgsCache = (r.items || []).map(orgDto);
+  return { items: orgsCache };
+}
+
+async function orgInfo(id) {
+  if (!orgsCache || !orgsCache.some((o) => o.id === id)) await orgs();
+  return orgsCache.find((o) => o.id === id) || { id, name: '', short: '', initials: '' };
+}
+
+const orgPath = (id, rest = '') => `/orgs/${enc(id)}${rest}`;
+const dateOf = (iso) => (iso ? String(iso).slice(0, 10) : almatyToday());
+function almatyToday() {
+  return new Date(Date.now() + 5 * 3600e3).toISOString().slice(0, 10);
+}
+
+// ---------- главная (5.1) ----------
+// В сводке нет порога: восстанавливаем его по разрыву (shortage = threshold − closing). Нет разрыва — красных дней нет.
+function thresholdFrom(s) {
+  if (!s.gap) return Number.NEGATIVE_INFINITY;
+  const day = [...(s.forecast || []), ...((s.week && s.week.days) || [])].find((d) => d.date === s.gap.date);
+  return day ? day.closing + s.gap.shortage : 0;
+}
+
+export async function home(id) {
+  const [s, org, unread] = await Promise.all([
+    getJSON(orgPath(id, '/summary')),
+    orgInfo(id),
+    getJSON(`/notifications?${qs({ org_id: id, unread_only: true, limit: 1 })}`).then((r) => r.unread_count || 0).catch(() => 0),
+  ]);
+  const rec = s.receivables || { total: 0, aging: {} };
+  const st = stored();
+  return {
+    today: s.date,
+    asOf: s.updated_at,
+    horizonDays: 28,
+    user: userDto(st && st.user),
+    org,
+    money: { total: s.money.total, bank: s.money.bank, cash: s.money.cash },
+    threshold: thresholdFrom(s),
+    forecast: { start: s.money.total, days: (s.forecast || []).map((d) => ({ date: d.date, end: d.closing })) },
+    gap: s.gap ? { date: s.gap.date, deficit: s.gap.shortage, outflow: s.gap.outflow, articles: s.gap.top_articles || [] } : null,
+    minBalance: s.min_day ? { date: s.min_day.date, amount: s.min_day.closing } : null,
+    approvals: { count: s.pending.count, sum: s.pending.amount, overLimit: s.pending.over_limit_count },
+    week: ((s.week && s.week.days) || []).map((d) => ({ date: d.date, in: d.inflow, out: d.outflow, end: d.closing })),
+    // В v1 нет просрочки, есть возраст долга: в поле «просрочено» передаём долг старше 60 дней (см. spec/api-client.md).
+    receivables: { total: rec.total, overdue: (rec.aging && rec.aging.days_over_60) || 0, worst: null },
+    unread,
+  };
+}
+
+// ---------- счета (5.2) ----------
+export async function accounts(id) {
+  const [r, org] = await Promise.all([getJSON(orgPath(id, '/accounts')), orgInfo(id)]);
+  return {
+    orgName: org.name,
+    total: r.total_kzt,
+    items: (r.items || []).map((a) => ({
+      name: a.name,
+      note: [a.note, a.number_masked, a.deposit ? 'депозит' : null, a.currency && a.currency !== 'KZT' ? `${fmt(a.balance)} ${a.currency}` : null].filter(Boolean).join(' · '),
+      type: a.type === 'cash' ? 'cash' : 'bank',
+      amount: a.balance_kzt,
+    })),
+  };
+}
+
+const fmt = (n) => Math.round(Number(n) || 0).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+
+// ---------- календарь (5.3) ----------
+export async function calendar(id) {
+  const r = await getJSON(orgPath(id, '/calendar'));
+  return {
+    today: r.from,
+    threshold: r.threshold || 0,
+    days: (r.days || []).map((d) => ({
+      date: d.date,
+      start: d.opening,
+      end: d.closing,
+      in: d.inflow,
+      out: d.outflow,
+      items: (d.items || []).map((i) => ({
+        dir: i.direction === 'in' ? 'in' : 'out',
+        who: i.counterparty || 'Без контрагента',
+        article: i.article || '',
+        note: [i.note, i.late ? 'дата прошла' : null, i.preliminary ? 'дата предварительная' : null,
+          i.currency && i.currency !== 'KZT' ? `сумма в ${i.currency}` : null].filter(Boolean).join(' · '),
+        amount: i.amount,
+        requestId: i.request_id || null,
+      })),
+    })),
+  };
+}
+
+// ---------- заявки (6) ----------
+// Статус для экрана — с точки зрения пользователя (my_action): ждёт решения / согласовал / отклонил / вернул.
+function screenStatus(r) {
+  if (r.my_action === 'required') return 'pending';
+  if (r.my_action === 'approved' || r.my_action === 'rejected' || r.my_action === 'returned') return r.my_action;
+  return { approved: 'approved', rejected: 'rejected', draft: 'returned', closed: 'approved' }[r.status] || 'pending';
+}
+
+function reqDto(r) {
+  return {
+    id: r.id,
+    num: r.number,
+    contractor: r.counterparty || '',
+    amount: r.amount_kzt != null ? r.amount_kzt : r.amount,
+    currency: r.currency || 'KZT',
+    article: r.article || '',
+    purpose: r.purpose || '',
+    initiator: { name: (r.initiator && r.initiator.name) || '', initials: (r.initiator && r.initiator.initials) || '', role: (r.initiator && r.initiator.position) || '' },
+    due: r.pay_by,
+    overLimit: r.over_limit || 0,
+    status: screenStatus(r),
+    decidedAt: r.my_decision_at || null,
+  };
+}
+
+export async function requests(id, tab) {
+  const items = [];
+  let cursor = null;
+  let updatedAt = null;
+  for (let page = 0; page < 5; page++) { // не больше 500 заявок
+    const r = await getJSON(orgPath(id, `/requests?${qs({ tab: tab === 'done' ? 'decided' : 'pending', limit: 100, cursor })}`));
+    updatedAt = updatedAt || r.updated_at;
+    items.push(...(r.items || []));
+    cursor = r.next_cursor;
+    if (!cursor) break;
+  }
+  return { today: dateOf(updatedAt), items: items.map(reqDto) };
+}
+
+const MONTHS = ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'];
+const monthName = (ym) => (ym ? MONTHS[Number(String(ym).slice(5, 7)) - 1] || ym : '');
+
+function sizeText(bytes) {
+  const n = Number(bytes) || 0;
+  if (n >= 1048576) return `${(n / 1048576).toFixed(1).replace('.', ',')} МБ`;
+  return `${Math.max(1, Math.round(n / 1024))} КБ`;
+}
+
+function routeStep(s) {
+  let status;
+  if (s.kind === 'created') status = 'created';
+  else if (s.state === 'current') status = 'pending';
+  else if (s.state === 'waiting') status = 'waiting';
+  else if (s.state === 'skipped') status = 'skipped';
+  else status = { approved: 'approved', rejected: 'rejected', returned: 'returned', sent: 'created' }[s.decision] || 'pending';
+  const who = (s.approver && s.approver.name) || '';
+  return {
+    name: s.on_behalf_of ? `${who} (за ${s.on_behalf_of})` : who,
+    role: s.kind === 'created' ? 'Инициатор' : [s.approver && s.approver.is_group ? 'группа согласующих' : null, `этап ${s.stage}`].filter(Boolean).join(' · '),
+    me: !!s.is_me,
+    status,
+    at: s.at || null,
+    comment: s.comment || '',
+  };
+}
+
+function cardDto(r) {
+  const b = (r.budgets || []).find((x) => x.article === r.article) || (r.budgets || [])[0];
+  return {
+    today: dateOf(r.updated_at),
+    ...reqDto(r),
+    payFrom: r.pay_from ? [r.pay_from.name, r.pay_from.number_masked].filter(Boolean).join(' · ') : null,
+    createdAt: r.created_at,
+    comment: r.comment || '',
+    // «Израсходовано» на экране — spent + approved_requests (контракт, 6.2)
+    budget: b && b.has_limit ? { period: monthName(b.month), limit: b.limit, used: (b.spent || 0) + (b.approved_requests || 0) } : null,
+    impact: r.impact ? { date: r.impact.date, before: r.impact.closing_before, after: r.impact.closing_after, inCalendar: !!r.impact.in_calendar } : null,
+    attachments: (r.files || []).map((f) => ({ id: f.id, name: f.name, size: sizeText(f.size), kind: 'pdf', contentType: f.content_type })),
+    route: (r.route || []).map(routeStep),
+    canDecide: r.my_action === 'required',
+  };
+}
+
+const getCard = (id, reqId) => getJSON(orgPath(id, `/requests/${enc(reqId)}`));
+export const request_ = async (id, reqId) => cardDto(await getCard(id, reqId));
+
+// Файл вложения (6.3) — потоком с авторизацией → object URL для просмотра.
+export async function attachment(id, reqId, fileId) {
+  const res = await authed('GET', orgPath(id, `/requests/${enc(reqId)}/files/${enc(fileId)}`), { headers: { Accept: '*/*' } });
   const blob = await res.blob();
-  return { kind: 'pdf', url: URL.createObjectURL(blob), name: att };
+  const disp = res.headers.get('Content-Disposition') || '';
+  const m = disp.match(/filename\*=UTF-8''([^;]+)/i);
+  let name = fileId;
+  try {
+    if (m) name = decodeURIComponent(m[1]);
+  } catch (e) {
+    /* имя как есть */
+  }
+  return { kind: 'pdf', url: URL.createObjectURL(blob), name };
 }
 
-// Решение по заявке. Ключ идемпотентности — в заголовке: повтор после обрыва связи не применится дважды.
-export async function decide(org, id, { decision, comment, idempotencyKey }) {
-  return request('POST', PATHS.decision(org, id), {
-    body: { decision, comment: comment || '' },
-    headers: { 'Idempotency-Key': idempotencyKey },
+// Решение (6.4–6.7): approve / reject / return. Ответ — обновлённая карточка.
+const ACTION_PATH = { approve: 'approve', reject: 'reject', return: 'return' };
+
+export async function decide(id, reqId, { decision, comment, idempotencyKey }) {
+  const action = ACTION_PATH[decision];
+  if (!action) throw new ApiError('server_error', `Неизвестное решение ${decision}`);
+  let res;
+  try {
+    res = await authed('POST', orgPath(id, `/requests/${enc(reqId)}/${action}`), {
+      body: comment ? { comment } : {},
+      headers: { 'Idempotency-Key': idempotencyKey },
+    });
+  } catch (e) {
+    // «Уже решено»: в ошибке нет кто и когда — перечитываем карточку (контракт: «Перечитайте карточку»).
+    if (e.code === 'already_decided') {
+      try {
+        const card = await getCard(id, reqId);
+        const last = [...(card.route || [])].reverse().find((s) => s.kind === 'approval' && s.state === 'done' && s.decision);
+        e.details = {
+          ...e.details,
+          status: { approved: 'approved', rejected: 'rejected', returned: 'returned' }[last && last.decision] || (card.status === 'rejected' ? 'rejected' : 'approved'),
+          by: last && last.approver ? last.approver.name : '',
+          at: last ? last.at : null,
+        };
+      } catch (e2) {
+        /* без подробностей */
+      }
+    }
+    throw e;
+  }
+  const card = await res.json();
+  const next = (card.route || []).find((s) => s.kind === 'approval' && (s.state === 'current' || s.state === 'waiting'));
+  return {
+    decision: { approve: 'approved', reject: 'rejected', return: 'returned' }[decision],
+    requestStatus: card.status === 'on_approval' ? 'in_approval' : card.status,
+    paymentDate: card.status === 'approved' ? card.pay_by : null,
+    nextApprover: next && next.approver ? next.approver.name : null,
+    replayed: res.headers.get('Idempotent-Replayed') === 'true',
+  };
+}
+
+// ---------- отчёты (7) ----------
+const MONTH_GEN = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
+function weekFull(w) {
+  const a = Number(String(w.from).slice(8, 10));
+  const b = Number(String(w.to).slice(8, 10));
+  return `${a}–${b} ${MONTH_GEN[Number(String(w.to).slice(5, 7)) - 1] || ''}`;
+}
+
+export async function report(id, kind) {
+  if (kind === 'plan') {
+    const r = await getJSON(orgPath(id, '/reports/plan-fact'));
+    const row = (x) => ({ article: x.article, plan: x.plan == null ? 0 : x.plan, fact: x.fact || 0 });
+    return { period: r.title, hasPlan: r.has_plan !== false, income: (r.income || []).map(row), expense: (r.expense || []).map(row) };
+  }
+  if (kind === 'debtors') {
+    const r = await getJSON(orgPath(id, `/reports/debtors?${qs({ limit: 5 })}`));
+    const top = (r.items || []).map((d) => ({
+      name: d.counterparty,
+      amount: d.amount,
+      // в v1 нет просрочки: «просрочено» — долг старше 60 дней, «дней» — возраст самого старого документа
+      overdue: (d.aging && d.aging.days_over_60) || 0,
+      days: d.oldest_days || 0,
+    }));
+    const topSum = top.reduce((s, d) => s + d.amount, 0);
+    return { asOf: r.date, total: r.total, overdue: (r.aging && r.aging.days_over_60) || 0, top, rest: Math.max(0, r.total - topSum) };
+  }
+  const r = await getJSON(orgPath(id, '/reports/cash-flow'));
+  return { period: r.title, weeks: (r.weeks || []).map((w) => ({ label: w.label, full: weekFull(w), in: w.inflow, out: w.outflow })) };
+}
+
+// ---------- уведомления (8) ----------
+const N_TYPE = { payment_corrected: 'payment', payment_cancelled: 'payment', decision: 'approved', limit: 'gap', balances: 'summary' };
+
+function linkStr(l) {
+  if (!l) return null;
+  if (l.kind === 'request' && l.request_id) return `request:${l.request_id}`;
+  if (l.kind === 'calendar' && l.date) return `calendar:${l.date}`;
+  if (l.kind === 'summary') return 'summary';
+  if (l.kind === 'debtors') return 'reports:debtors';
+  return null;
+}
+
+export async function notifications(id) {
+  const r = await getJSON(`/notifications?${qs({ org_id: id, unread_only: false, limit: 50 })}`);
+  return {
+    today: almatyToday(),
+    unread: r.unread_count || 0,
+    items: (r.items || []).map((n) => ({
+      id: n.id,
+      type: N_TYPE[n.type] || n.type,
+      at: n.created_at,
+      title: n.title,
+      text: n.text,
+      read: !!n.read,
+      link: linkStr(n.link),
+    })),
+  };
+}
+
+export const markRead = (id, nId) => authed('POST', '/notifications/read', { body: { ids: [nId] } });
+export const markAllRead = (id) => authed('POST', '/notifications/read', { body: { all: true, org_id: id } });
+
+// Утренняя сводка — те же данные главной (link.kind = summary).
+export async function summary(id) {
+  const [s, org] = await Promise.all([getJSON(orgPath(id, '/summary')), orgInfo(id)]);
+  return {
+    asOf: s.updated_at,
+    orgName: org.name,
+    money: s.money,
+    today: { in: s.today.inflow, out: s.today.outflow },
+    gap: s.gap ? { date: s.gap.date, deficit: s.gap.shortage } : null,
+    approvals: { count: s.pending.count, sum: s.pending.amount },
+    overdue: (s.receivables && s.receivables.aging && s.receivables.aging.days_over_60) || 0,
+  };
+}
+
+// ---------- настройки (4.3) ----------
+const SETTING_KEYS = ['summary', 'requests', 'payments', 'gaps', 'whatsapp'];
+
+function settingsDto(r) {
+  const n = (r && r.notifications) || {};
+  const out = {};
+  notEditable.clear();
+  SETTING_KEYS.forEach((k) => {
+    out[k] = !!(n[k] && n[k].enabled);
+    if (n[k] && n[k].editable === false) notEditable.add(k);
   });
+  return out;
 }
 
-// ---------- push ----------
-export const pushConfig = () => get(PATHS.pushConfig);
-export const savePushSubscription = (sub) => request('POST', PATHS.pushSubscriptions, { body: { subscription: sub, device: deviceName() } });
-export const deletePushSubscription = (endpoint) => request('DELETE', PATHS.pushSubscriptions, { body: { endpoint } });
+export const settings = async () => settingsDto(await getJSON('/me/settings'));
 
-function deviceName() {
-  const ua = navigator.userAgent || '';
-  const os = /iPhone|iPad/.test(ua) ? 'iOS' : /Android/.test(ua) ? 'Android' : /Mac OS/.test(ua) ? 'macOS' : /Windows/.test(ua) ? 'Windows' : 'другое';
-  const standalone = (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || navigator.standalone;
-  return `${os}${standalone ? ', приложение' : ', браузер'}`;
+export async function saveSettings(patch) {
+  const notifications = {};
+  for (const [k, v] of Object.entries(patch)) {
+    if (notEditable.has(k)) throw new ApiError('forbidden', 'Этот переключатель настраивает администратор компании');
+    notifications[k] = { enabled: !!v };
+  }
+  return settingsDto(await (await authed('PUT', '/me/settings', { body: { notifications } })).json());
+}
+
+// ---------- push (9) ----------
+export async function pushConfig() {
+  if (!versionInfo) {
+    try {
+      await init();
+    } catch (e) {
+      /* версия проверится при следующем запуске */
+    }
+  }
+  return { vapidPublicKey: (versionInfo && versionInfo.webpush_public_key) || null };
+}
+
+export async function savePushSubscription(sub) {
+  const r = await (await authed('POST', '/devices', {
+    body: { platform: 'web', provider: 'webpush', subscription: sub, app_version: CONFIG.appVersion },
+  })).json();
+  if (r && r.device_id) storage.set(DEVICE_KEY, r.device_id);
+  return r;
+}
+
+// Выключить push на этом устройстве. При выходе подписка удаляется сервером вместе с сессией (9.2).
+export async function deletePushSubscription() {
+  const dev = storage.get(DEVICE_KEY);
+  if (!dev) return;
+  try {
+    await authed('DELETE', `/devices/${enc(dev)}`);
+  } finally {
+    storage.remove(DEVICE_KEY);
+  }
 }

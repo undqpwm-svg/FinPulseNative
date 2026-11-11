@@ -43,6 +43,7 @@ export const api = {
   requestCode: (digits10) => call('requestCode', digits10),
   verifyCode: (p) => call('verifyCode', p),
   logout: () => call('logout'),
+  logoutAll: () => call('logoutAll'),
   me: () => call('me'),
   // организация
   orgId: () => impl().orgId(),

@@ -1,15 +1,20 @@
 // Единственное место настроек приложения. Секретов здесь нет и быть не должно:
 // ключи доступа к 1С и токены WhatsApp живут только на сервере-посреднике.
 export const CONFIG = {
-  // Адрес API сервера-посредника. При смене — поправить и connect-src в Content-Security-Policy (index.html).
-  apiBase: 'https://api.smartsol.pro/v1',
+  // Адрес API сервера-посредника (контракт v1). Тестовый: 'https://api-test.smartsol.pro/api/v1'.
+  // При смене хоста — поправить и connect-src в Content-Security-Policy (index.html).
+  apiBase: 'https://api.smartsol.pro/api/v1',
+
+  // Версия приложения — уходит в X-App-Version; сервер сравнивает её с min_app_version (GET /version).
+  appVersion: '1.0.0',
 
   // Режим по умолчанию: 'server' — настоящий вход и данные из 1С; 'demo' — выдуманные данные из data/demo.json.
   // Демо всегда доступно ссылкой «Посмотреть демо» на экране входа и адресом #/demo.
   defaultMode: 'server',
 
   // Сколько ждать ответа сервера, мс. Дольше — «Сервер долго не отвечает» и кнопка «Обновить».
-  requestTimeoutMs: 20000,
+  // Больше, чем ждёт сам сервер (20 с до 504 source_timeout), чтобы его ответ успел прийти.
+  requestTimeoutMs: 25000,
 
   // Через сколько мс показывать индикатор загрузки (быстрые ответы — без мигания).
   loadingDelayMs: 180,

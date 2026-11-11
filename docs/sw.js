@@ -1,6 +1,6 @@
 // Сервис-воркер: оболочка приложения (сначала сеть, без сети — кэш) и push-уведомления.
 // Ответы API (api.smartsol.pro) НЕ кэшируются и не проходят через кэш: данные клиента не оседают на устройстве.
-const CACHE = 'finpuls-v4';
+const CACHE = 'finpuls-v5';
 const SHELL = [
   './', './index.html', './css/app.css', './manifest.webmanifest', './data/demo.json',
   './js/app.js', './js/config.js', './js/screens.js', './js/store.js', './js/ui.js', './js/util.js', './js/icons.js', './js/push.js',
@@ -37,14 +37,14 @@ self.addEventListener('fetch', (e) => {
 });
 
 // ---------- push ----------
-// КОНТРАКТ (spec/api-client.md): { "type": "request", "orgId": "…", "requestId": "…", "amount": 2300000 }.
-// В событии нет названий и комментариев — только ИД заявки и сумма; подробности приложение берёт из 1С при открытии.
-const NB = ' ';
-const money = (n) => `${Math.round(Math.abs(Number(n) || 0)).toString().replace(/\B(?=(\d{3})+(?!\d))/g, NB)}${NB}₸`;
-
+// Контракт v1, 9.3: { type, title, body, org_id, request_id, notification_id, sent_at }.
+// В push нет сумм и контрагентов — детали приложение запрашивает у сервера при открытии.
 function hashFor(d) {
-  if (d.type === 'request' && d.requestId) return `#/requests/${encodeURIComponent(d.requestId)}${d.orgId ? `?org=${encodeURIComponent(d.orgId)}` : ''}`;
-  return '#/home';
+  if (d.type === 'request' && d.request_id) {
+    const q = [d.org_id ? `org=${encodeURIComponent(d.org_id)}` : '', d.notification_id ? `n=${encodeURIComponent(d.notification_id)}` : ''].filter(Boolean).join('&');
+    return `#/requests/${encodeURIComponent(d.request_id)}${q ? `?${q}` : ''}`;
+  }
+  return '#/notifications'; // неизвестный type — список уведомлений
 }
 
 self.addEventListener('push', (e) => {
@@ -54,12 +54,10 @@ self.addEventListener('push', (e) => {
   } catch (err) {
     d = {};
   }
-  const isRequest = d.type === 'request';
-  const title = isRequest ? 'Новая заявка на согласование' : d.title || 'ФинПульс';
-  const body = isRequest ? (d.amount != null ? `${money(d.amount)} — нажмите, чтобы открыть` : 'Нажмите, чтобы открыть') : d.body || '';
+  const title = d.title || (d.type === 'request' ? 'Новая заявка на согласование' : 'ФинПульс');
   e.waitUntil(self.registration.showNotification(title, {
-    body,
-    tag: isRequest && d.requestId ? `request-${d.requestId}` : undefined,
+    body: d.body || 'Откройте, чтобы посмотреть',
+    tag: d.request_id ? `request-${d.request_id}` : d.notification_id || undefined,
     renotify: true,
     icon: 'icons/icon-192.png',
     badge: 'icons/icon-192.png',

@@ -294,13 +294,18 @@ const PUSH_STUB = () => {
       await page.goto(BASE);
       await settle(page, 900);
       ok((await page.evaluate(() => location.hash)) === '#/login', 'по умолчанию — настоящий вход');
-      ok(API === 'https://api-test.smartsol.pro/api/v1', 'сборка ходит на тестовый сервер api-test.smartsol.pro');
+      ok(API === 'https://api.smartsol.pro/api/v1', 'сборка ходит на рабочий сервер api.smartsol.pro');
       const ver = ctl.calls.find((c) => c.path === '/version');
       ok(ver && ver.headers['x-app-version'] === '1.0.0' && ver.headers['x-app-platform'] === 'web', 'при запуске GET /version с X-App-Version и X-App-Platform');
       ok(norm(await page.locator('[data-act="tg-start"]').innerText()).includes('Войти через Telegram') && (await page.locator('#phone, #code').count()) === 0, 'кнопка «Войти через Telegram», полей номера и кода нет');
       await shot(page, '01-vhod');
       const tgErr = () => page.locator('.screen:not(.leaving) #tg-err').innerText().then(norm);
       const waitErr = () => page.waitForSelector('.screen:not(.leaving) #tg-err:not([hidden])', { timeout: 8000 });
+      // «Начать заново»: дождаться нового экрана ожидания, чтобы не принять старую ошибку за новую
+      const restart = async () => {
+        await page.locator('[data-restart]').click();
+        await page.waitForSelector('.screen:not(.leaving) [data-tg-status]:not([hidden])', { timeout: 8000 });
+      };
 
       // 429 на start
       st.startLimited = true;
@@ -338,7 +343,7 @@ const PUSH_STUB = () => {
       await shot(page, '03-drugoe-chislo');
 
       // заново → 409 blocked с таймером
-      await page.locator('[data-restart]').click();
+      await restart();
       await settle(page, 900);
       ok(st.starts === 2 && (await page.locator('[data-tg-code]').innerText()).trim() === '05', 'новый вход — новое число (может начинаться с 0: «05»)');
       st.queue = ['blocked'];
@@ -362,13 +367,13 @@ const PUSH_STUB = () => {
 
       // 410 challenge_expired
       st.queue = ['expired'];
-      await page.locator('[data-restart]').click();
+      await restart();
       await waitErr();
       ok((await tgErr()).includes('Время входа истекло'), '410 challenge_expired — «Время входа истекло, начните заново»');
 
       // 503 source_unavailable — вход отменён, заново через минуту
       st.queue = ['source'];
-      await page.locator('[data-restart]').click();
+      await restart();
       await waitErr();
       ok((await tgErr()).includes('Нет связи с учётом компании'), '503 source_unavailable — «Нет связи с учётом компании»');
       ok(/через [01]:\d\d/.test(norm(await page.locator('[data-restart]').innerText())), '«Начать заново» — через минуту (Retry-After)');

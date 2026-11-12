@@ -1,9 +1,9 @@
 // Единственное место настроек приложения. Секретов здесь нет и быть не должно:
 // ключи доступа к 1С и токены WhatsApp живут только на сервере-посреднике.
 export const CONFIG = {
-  // Адрес API сервера-посредника (контракт v1). Эта сборка — тестовый сервер; рабочий: 'https://api.smartsol.pro/api/v1'.
+  // Адрес API сервера-посредника (контракт v1). Эта сборка — рабочий сервер; тестовый: 'https://api-test.smartsol.pro/api/v1'.
   // При смене хоста — поправить и connect-src в Content-Security-Policy (index.html).
-  apiBase: 'https://api-test.smartsol.pro/api/v1',
+  apiBase: 'https://api.smartsol.pro/api/v1',
 
   // Версия приложения — уходит в X-App-Version; сервер сравнивает её с min_app_version (GET /version).
   appVersion: '1.0.0',

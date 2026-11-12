@@ -10,7 +10,7 @@
 
 | Файл | Что |
 |---|---|
-| `docs/js/config.js` | `apiBase` — **сейчас тестовый** `https://api-test.smartsol.pro/api/v1` (рабочий — `https://api.smartsol.pro/api/v1`), `appVersion`, таймаут 25 с |
+| `docs/js/config.js` | `apiBase` — рабочий `https://api.smartsol.pro/api/v1` (тестовый — `https://api-test.smartsol.pro/api/v1`), `appVersion`, таймаут 25 с |
 | `docs/js/api/server.js` | **переходник**: запросы по контракту → DTO экранов; токены; коды ошибок |
 | `docs/js/api/demo.js` | те же DTO на выдуманных данных, без сети |
 | `docs/sw.js` | push по формату 9.3, открытие заявки |

@@ -1,4 +1,5 @@
-// Общее для реализаций API: ошибка с кодом, безопасное хранилище браузера, идентификаторы.
+// Общее для реализаций API: ошибка с кодом, безопасное хранилище браузера, идентификаторы, склейка одинаковых запросов.
+import { isTestEnv } from '../config.js';
 
 // Коды ошибок, которые понимают экраны (сервер может прислать свой code в теле ответа):
 //  network               — нет связи с сервером (fetch не дошёл)
@@ -9,7 +10,7 @@
 //  forbidden             — нет прав (например, решение по заявке не ваше)
 //  not_found             — объект не найден
 //  already_decided       — по заявке уже приняли решение (в 1С или с другого устройства)
-//  code_invalid / code_expired / too_many_attempts / rate_limited — вход по коду
+//  code_invalid / code_not_sent / challenge_rejected / challenge_expired — вход по коду из Telegram
 //  comment_required      — отклонение без комментария
 //  server_error          — прочее
 export class ApiError extends Error {
@@ -24,11 +25,13 @@ export class ApiError extends Error {
 }
 
 // localStorage может быть недоступен (приватный режим, запрет cookies) — тогда работаем в памяти.
+// Тестовый сервер (?api=test) — всё в sessionStorage: только эта вкладка, рабочие данные в localStorage не трогаются.
+const area = () => (isTestEnv() ? sessionStorage : localStorage);
 const memory = new Map();
 export const storage = {
   get(key) {
     try {
-      const v = localStorage.getItem(key);
+      const v = area().getItem(key);
       return v === null ? (memory.has(key) ? memory.get(key) : null) : v;
     } catch (e) {
       return memory.has(key) ? memory.get(key) : null;
@@ -37,7 +40,7 @@ export const storage = {
   set(key, value) {
     memory.set(key, value);
     try {
-      localStorage.setItem(key, value);
+      area().setItem(key, value);
     } catch (e) {
       /* остаётся только в памяти */
     }
@@ -45,7 +48,7 @@ export const storage = {
   remove(key) {
     memory.delete(key);
     try {
-      localStorage.removeItem(key);
+      area().removeItem(key);
     } catch (e) {
       /* нечего удалять */
     }
@@ -76,3 +79,18 @@ export function uuid() {
   }
 }
 
+// Склейка одинаковых запросов: пока первый не ответил, второй такой же не уходит — оба ждут один ответ.
+// Ключ — «метод + путь с параметрами». Только для чтения (GET): POST и решения по заявкам сюда не попадают.
+// Ответ не запоминается: как только запрос завершился (успехом или ошибкой), следующий вызов пойдёт в сеть заново.
+const inflight = new Map();
+export function once(key, load) {
+  const hit = inflight.get(key);
+  if (hit) return hit;
+  const p = Promise.resolve().then(load).finally(() => {
+    if (inflight.get(key) === p) inflight.delete(key);
+  });
+  inflight.set(key, p);
+  return p;
+}
+// Сменился пользователь или сервер — чужие незавершённые запросы новым вызовам не отдаём.
+export const forgetInflight = () => inflight.clear();

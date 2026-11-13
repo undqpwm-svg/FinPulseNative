@@ -1,6 +1,7 @@
 // Экраны и действия. Данные — только через api.* (js/api/index.js): экран не знает, демо это или 1С.
 // Каждый экран — async-функция: получает DTO (spec/api-client.md) и возвращает { key, html, … }.
 import { api, isDemo, setMode, ApiError } from './api/index.js';
+import { CONFIG } from './config.js';
 import { uuid, storage } from './api/core.js';
 import { I, logoMark } from './icons.js';
 import { navigate, replace, openSheet, closeSheet, setSheet, sheetOpen, toast, success, nav } from './ui.js';
@@ -181,8 +182,8 @@ function actionError(e) {
 // ======================================================================
 // ВХОД
 // ======================================================================
-// Вход через Telegram-бота SmartSol (контракт, 2): число на экране → бот в Telegram → опрос сервера.
-const TG_BLOCK_KEY = 'finpuls-tg-blocked'; // аккаунт заблокирован на 15 минут (challenge_rejected, blocked)
+// Вход через Telegram-бота SmartSol (контракт, 2): бот присылает одноразовый код → пользователь вводит его здесь.
+const TG_BLOCK_KEY = 'finpuls-tg-blocked'; // до какого времени вход закрыт (challenge_rejected, blocked); кода и токенов тут нет
 const blockedLeft = () => Math.max(0, Math.ceil(((Number(storage.get(TG_BLOCK_KEY)) || 0) - Date.now()) / 1000));
 const mmss = (sec) => `${Math.floor(sec / 60)}:${String(Math.max(0, sec) % 60).padStart(2, '0')}`;
 
@@ -205,7 +206,7 @@ function loginErrorText(e) {
 
 const tgHint = () => (isDemo()
   ? 'Демо: бот SmartSol откроется прямо в приложении'
-  : `Откроется бот SmartSol в${NB}Telegram. Паролей и${NB}кодов нет`);
+  : `Откроется бот SmartSol в${NB}Telegram. Пароль не${NB}нужен`);
 
 views.login = async () => {
   const demo = isDemo();
@@ -257,7 +258,7 @@ views.login = async () => {
   };
 };
 
-// Начать вход: POST /auth/telegram/start → число и ссылка на бота. Окно для Telegram открываем сразу по нажатию
+// Начать вход: POST /auth/telegram/start → ссылка на бота и длина кода. Окно для Telegram открываем сразу по нажатию
 // (иначе браузер сочтёт его всплывающим и заблокирует), адрес подставляем, когда придёт ответ.
 actions['tg-start'] = async (b) => {
   if (b.classList.contains('loading') || blockedLeft() > 0) return;
@@ -308,14 +309,390 @@ actions['mode-server'] = () => {
   nav.route();
 };
 
-// Экран ожидания: крупное число, «Открыть Telegram ещё раз», опрос POST /auth/telegram/poll раз в poll_interval.
+// Экран после «Войти через Telegram». Сервер прислал code_length — ввод одноразового кода (контракт, 2);
+// прислал match_code — прежний экран с числом (ВРЕМЕННО, переходный период — см. telegramMatch ниже).
 views.telegram = async () => {
   const t = ui.tg;
   if (!t) return { redirect: '#/login' };
+  return t.codeLength ? telegramCode(t) : telegramMatch(t);
+};
+
+// Общее для обоих экранов входа: «вход не удался» — текст и «Начать заново» (при блокировке — с таймером).
+function tgRestart(el, acts, wait) {
+  acts.innerHTML = '<button class="btn btn-primary btn-block" data-act="tg-start" data-restart><span>Начать заново</span></button>';
+  if (!(wait > 0)) return;
+  const btn = acts.querySelector('[data-restart]');
+  const until = Date.now() + wait * 1000;
+  const draw = () => {
+    const s = Math.ceil((until - Date.now()) / 1000);
+    btn.disabled = s > 0;
+    btn.querySelector('span').textContent = s > 0 ? `Начать заново через ${mmss(s)}` : 'Начать заново';
+    return s;
+  };
+  draw();
+  const tt = setInterval(() => {
+    if (!el.isConnected || draw() <= 0) clearInterval(tt);
+  }, 1000);
+}
+
+// Вход выполнен (токены получены): дальше — выбор организации.
+function tgSignedIn() {
+  ui.tg = null;
+  storage.remove(TG_BLOCK_KEY);
+  closeSheet();
+  invalidate();
+  syncPush();
+  setTimeout(() => navigate('#/orgs', 'push'), 450);
+}
+
+// Ввод кода: бот присылает код из code_length цифр, пользователь вводит его здесь.
+// Опрос POST /auth/telegram/poll (раз в poll_interval) токенов не выдаёт — по нему видно, что код отправлен, срок вышел
+// или вход отклонён. Токены — только из POST /auth/telegram/confirm. Сам код приложение не знает, не хранит и не пишет
+// в журнал: он живёт в поле ввода и уходит в теле одного запроса.
+function telegramCode(t) {
   const demo = !!t.demoBot;
+  const n = t.codeLength;
   const open = demo
-    ? `<button class="btn btn-ghost-dark btn-block" data-act="tg-demo-bot">${I.tg}Открыть бота</button>`
-    : `<a class="btn ${t.opened ? 'btn-ghost-dark' : 'btn-primary'} btn-block" href="${H(t.botUrl)}" target="_blank" rel="noopener noreferrer" data-tg-open>${I.tg}${t.opened ? 'Открыть Telegram ещё раз' : 'Открыть Telegram'}</a>`;
+    ? `<button class="btn btn-ghost-dark btn-block" data-act="tg-demo-bot">${I.tg}Открыть Telegram ещё раз</button>`
+    : `<a class="btn btn-ghost-dark btn-block" href="${H(t.botUrl)}" target="_blank" rel="noopener noreferrer" data-tg-open>${I.tg}${t.opened ? 'Открыть Telegram ещё раз' : 'Открыть Telegram'}</a>`;
+  return {
+    key: 'telegram', depth: 1, theme: 'dark', title: 'Вход через Telegram',
+    html: `<header class="topbar topbar-dark"><button class="tb-btn" data-back="#/login" aria-label="Назад">${I.chevL}</button><div class="tb-title"></div><div class="tb-right"></div></header>
+    <div class="scroll login tg-screen">
+      <h1 class="login-title sm">Введите код из&nbsp;Telegram</h1>
+      <p class="login-sub tg-sub">Код пришлёт бот в&nbsp;Telegram. При первом входе бот попросит «Поделиться номером».</p>
+      <div class="tg-field" data-tg-field style="--n:${n}">
+        <div class="tg-cells" aria-hidden="true">${'<i></i>'.repeat(n)}</div>
+        <input class="tg-input" data-tg-input type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="one-time-code" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="done" aria-label="Код из Telegram, ${n} ${plural(n, ['цифра', 'цифры', 'цифр'])}">
+      </div>
+      <div class="tg-under"><button class="link-btn on-dark" type="button" data-tg-paste>Вставить код</button></div>
+      <div class="form-err on-dark" id="tg-code-err" role="alert" hidden></div>
+      <div class="tg-status" data-tg-status role="status">${spinner}<span data-tg-text>Ждём код от${NB}бота</span><b data-tg-left></b></div>
+      <div class="form-err on-dark" id="tg-err" role="alert" hidden></div>
+      <div class="tg-actions" data-tg-actions>
+        <button class="btn btn-primary btn-block" type="button" data-tg-submit disabled>Войти</button>
+        ${open}
+      </div>
+      <p class="tg-note" data-tg-note>Если номер подключён к${NB}ФинПульсу, код придёт в${NB}течение минуты. Не${NB}пришёл${NB}— начните вход заново или обратитесь к${NB}администратору вашей компании.</p>
+      <p class="tg-warn">${I.shield}<span>Никому не называйте этот код. Он нужен только для входа на${NB}этом экране.</span></p>
+    </div>`,
+    mount(el) {
+      const q = (s) => el.querySelector(s);
+      const field = q('[data-tg-field]');
+      const input = q('[data-tg-input]');
+      const cells = [...el.querySelectorAll('.tg-cells i')];
+      const submit = q('[data-tg-submit]');
+      const paste = q('[data-tg-paste]');
+      const status = q('[data-tg-status]');
+      const text = q('[data-tg-text]');
+      const leftEl = q('[data-tg-left]');
+      const err = q('#tg-err');
+      const codeErr = q('#tg-code-err');
+      const acts = q('[data-tg-actions]');
+      const every = t.pollInterval * 1000;
+      let expiresAt = t.startedAt + t.expiresIn * 1000; // срок ссылки на бота; когда код придёт — срок кода
+      let sent = false; // бот прислал код (опрос ответил code_sent)
+      let timer = null;
+      let inflight = false; // идёт опрос
+      let confirming = false; // идёт проверка кода
+      let done = false;
+      let last = 0;
+      let holdUntil = 0; // 429 на вводе кода: до этого времени код не отправляем
+      const alive = () => el.isConnected && !done && ui.tg === t;
+
+      // ---------- поле кода ----------
+      const digitsOf = (s) => String(s == null ? '' : s).replace(/\D/g, '').slice(0, n);
+      const paint = () => {
+        const v = input.value;
+        cells.forEach((c, i) => {
+          c.textContent = v[i] || '';
+          c.classList.toggle('on', i === Math.min(v.length, n - 1));
+        });
+        submit.disabled = done || confirming || v.length !== n || Date.now() < holdUntil;
+      };
+      const showCodeErr = (html, kind = '') => {
+        codeErr.hidden = false;
+        codeErr.dataset.kind = kind;
+        codeErr.innerHTML = `${I.alert}<span>${html}</span>`;
+      };
+      const hideCodeErr = () => {
+        codeErr.hidden = true;
+        codeErr.dataset.kind = '';
+      };
+      const shake = () => {
+        field.classList.add('err');
+        field.classList.remove('shake');
+        void field.offsetWidth;
+        field.classList.add('shake');
+      };
+      // Принять введённое или вставленное: только цифры, не длиннее кода. Код набран целиком — отправляем сразу.
+      const setCode = (raw) => {
+        input.value = digitsOf(raw);
+        field.classList.remove('err');
+        paint();
+        if (input.value.length === n) send();
+      };
+      input.addEventListener('input', () => setCode(input.value));
+      input.addEventListener('paste', (e) => {
+        const s = e.clipboardData ? e.clipboardData.getData('text') : null;
+        if (s == null) return; // буфер недоступен — пусть вставит браузер, цифры отберём в input
+        e.preventDefault();
+        setCode(s); // «483 921», «483-921» и всё сообщение бота целиком тоже подойдут
+      });
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          send();
+        }
+      });
+      input.addEventListener('focus', () => field.classList.add('focus'));
+      input.addEventListener('blur', () => field.classList.remove('focus'));
+      submit.addEventListener('click', () => send());
+      // «Вставить код»: в Telegram код копируется нажатием, здесь — одно нажатие вместо долгого. Браузер может
+      // спросить разрешение на чтение буфера; нет такой возможности — кнопки нет, вставка в поле работает как обычно.
+      if (!demo && !(navigator.clipboard && navigator.clipboard.readText)) paste.hidden = true;
+      paste.addEventListener('click', async () => {
+        if (!alive() || confirming) return;
+        let s = demo ? t.demoClip || '' : '';
+        if (!s) {
+          try {
+            s = await navigator.clipboard.readText();
+          } catch (e) {
+            s = '';
+          }
+        }
+        if (!alive() || confirming) return;
+        if (digitsOf(s).length !== n) {
+          showCodeErr(`В${NB}буфере нет кода. В${NB}Telegram нажмите на${NB}код в${NB}сообщении бота${NB}— он скопируется.`, 'paste');
+          return;
+        }
+        hideCodeErr();
+        setCode(s);
+      });
+      paint();
+
+      // ---------- таймер и опрос ----------
+      const drawLeft = () => {
+        const s = Math.ceil((expiresAt - Date.now()) / 1000);
+        leftEl.textContent = s > 0 ? mmss(s) : '';
+        if (s <= 0 && !done) text.textContent = 'Время вышло — проверяем';
+      };
+      const tick = setInterval(() => (el.isConnected && !done ? drawLeft() : clearInterval(tick)), 1000);
+      drawLeft();
+      const schedule = (ms) => {
+        clearTimeout(timer);
+        timer = setTimeout(poll, Math.max(0, ms));
+      };
+      // Вернулись из Telegram — опросить сразу, но не чаще poll_interval.
+      const soon = () => {
+        if (alive() && !inflight && document.visibilityState !== 'hidden') schedule(last + every - Date.now());
+      };
+      const stop = () => {
+        done = true;
+        clearTimeout(timer);
+        clearInterval(tick);
+        document.removeEventListener('visibilitychange', soon);
+        window.removeEventListener('focus', soon);
+        window.removeEventListener('tg-poll', soon);
+      };
+      document.addEventListener('visibilitychange', soon);
+      window.addEventListener('focus', soon);
+      window.addEventListener('tg-poll', soon);
+
+      // Вход не удался: текст и «Начать заново» (при блокировке — с таймером). Поле кода больше не нужно.
+      const fail = (msg, { wait = 0, kind = '' } = {}) => {
+        stop();
+        field.classList.add('off');
+        input.disabled = true;
+        input.value = '';
+        paint();
+        paste.hidden = true;
+        hideCodeErr();
+        status.hidden = true;
+        q('[data-tg-note]').hidden = true;
+        err.hidden = false;
+        err.dataset.kind = kind;
+        err.innerHTML = `${I.alert}<span>${msg}</span>`;
+        tgRestart(el, acts, wait);
+      };
+      const msg = (e, fallback) => H((e && e.message) || fallback);
+
+      // Отказы, общие для опроса и ввода кода. true — вход закончен (или опрос перенесён), false — ошибку не узнали.
+      function refused(e) {
+        const c = e instanceof ApiError ? e.code : 'server_error';
+        const d = (e && e.details) || {};
+        if (c === 'challenge_rejected' && d.reason === 'blocked') {
+          const sec = Number(d.retry_after) || e.retryAfter || 900;
+          storage.set(TG_BLOCK_KEY, String(Date.now() + sec * 1000));
+          fail(msg(e, 'Слишком много попыток входа. Вход через Telegram закрыт на 15 минут.'), { wait: sec, kind: 'blocked' });
+        } else if (c === 'challenge_rejected') fail(msg(e, 'Код введён неверно несколько раз. Начните вход заново.'), { kind: 'wrong_code' });
+        else if (c === 'access_revoked') fail(msg(e, 'Доступ к приложению выключен. Обратитесь к администратору ФинПульса в своей компании.'), { kind: 'access_revoked' });
+        else if (c === 'challenge_expired') fail(sent ? 'Срок действия кода вышел. Начните вход заново — бот пришлёт новый код.' : 'Время входа вышло. Начните заново.', { kind: 'expired' });
+        else if (c === 'not_found') fail('Вход не найден. Начните заново.', { kind: 'expired' });
+        else if (c === 'upstream_unavailable') fail('Нет связи с учётом компании. Вход отменён — начните заново через минуту.', { wait: e.retryAfter || 60, kind: 'source' });
+        else if (c === 'app_outdated') fail('Версия приложения устарела — обновите страницу.', { kind: 'outdated' });
+        else if (c === 'maintenance') fail('Сервер на обслуживании. Повторите чуть позже.', { wait: e.retryAfter || 0, kind: 'maintenance' });
+        else return false;
+        return true;
+      }
+
+      function pollFailed(e) {
+        const c = e instanceof ApiError ? e.code : 'server_error';
+        if (refused(e)) return;
+        if (c === 'too_many_requests') return schedule(Math.max(every, (e.retryAfter || 0) * 1000)); // опрашиваем реже
+        if (c === 'network' || c === 'timeout' || c === 'server_unavailable') {
+          text.textContent = 'Нет связи — пробуем снова';
+          return schedule(Math.max(every, 4000));
+        }
+        return fail('Не получилось, попробуйте позже.', { kind: 'error' });
+      }
+
+      const waitText = () => (sent ? 'Срок действия кода' : `Ждём код от${NB}бота`);
+
+      async function poll() {
+        if (!alive() || inflight) return;
+        if (confirming) return schedule(every); // код проверяется — ответ опроса сейчас ничего не решает
+        inflight = true;
+        last = Date.now();
+        let r;
+        let failed = null;
+        try {
+          r = await api.pollLogin(t.challengeId);
+        } catch (e) {
+          failed = e;
+        }
+        inflight = false;
+        if (!alive()) return;
+        // Пока шёл опрос, код ушёл на проверку: после удачного входа опрос ответил бы 410 — такой ответ не слушаем.
+        if (confirming) return schedule(every);
+        if (failed) return pollFailed(failed);
+        if (r.status === 'ok') return signedIn(); // сервер прежней схемы выдал токены опросом — тоже вход
+        if (r.status === 'code_sent') {
+          sent = true;
+          status.classList.add('sent');
+          status.dataset.state = 'sent';
+          if (r.expiresIn > 0) expiresAt = Date.now() + r.expiresIn * 1000;
+          if (codeErr.dataset.kind === 'not_sent') hideCodeErr();
+        }
+        text.innerHTML = waitText();
+        drawLeft();
+        schedule(every);
+      }
+
+      // ---------- проверка кода ----------
+      const idle = () => {
+        confirming = false;
+        input.readOnly = false;
+        submit.classList.remove('loading');
+        submit.textContent = 'Войти';
+        paint();
+      };
+
+      function signedIn() {
+        stop();
+        field.classList.add('ok');
+        input.readOnly = true;
+        submit.disabled = true;
+        paste.hidden = true;
+        hideCodeErr();
+        status.hidden = false;
+        status.classList.add('ok');
+        status.innerHTML = `${I.check}<span>Вход выполнен</span>`;
+        tgSignedIn();
+      }
+
+      function confirmFailed(e) {
+        const c = e instanceof ApiError ? e.code : 'server_error';
+        const d = (e && e.details) || {};
+        idle();
+        if (refused(e)) return;
+        if (c === 'code_invalid') {
+          const leftN = Number(d.attemptsLeft != null ? d.attemptsLeft : d.attempts_left);
+          input.value = '';
+          paint();
+          shake();
+          showCodeErr(leftN > 0 ? `Неверный код. Осталось попыток: ${leftN}` : msg(e, 'Неверный код. Проверьте и введите ещё раз.'), 'code_invalid');
+          input.focus();
+        } else if (c === 'code_not_sent') {
+          showCodeErr(`Бот ещё не прислал код. Откройте Telegram${NB}— бот пришлёт код.`, 'not_sent');
+        } else if (c === 'validation_error') {
+          shake();
+          showCodeErr(`В${NB}коде должно быть ${n} ${plural(n, ['цифра', 'цифры', 'цифр'])}. Проверьте и введите ещё раз.`, 'validation');
+        } else if (c === 'too_many_requests' || c === 'rate_limited') {
+          const sec = e.retryAfter || 60;
+          holdUntil = Date.now() + sec * 1000;
+          paint();
+          const draw = () => {
+            const s = Math.ceil((holdUntil - Date.now()) / 1000);
+            if (s > 0) showCodeErr(`Слишком много попыток. Повторите через ${mmss(s)}`, 'rate');
+            else {
+              if (codeErr.dataset.kind === 'rate') hideCodeErr();
+              paint();
+            }
+            return s;
+          };
+          draw();
+          const tt = setInterval(() => {
+            if (!alive() || draw() <= 0) clearInterval(tt);
+          }, 1000);
+        } else if (c === 'network' || c === 'timeout' || c === 'server_unavailable') {
+          showCodeErr('Нет связи с сервером. Проверьте интернет и нажмите «Войти» ещё раз.', 'network');
+        } else {
+          showCodeErr('Не получилось проверить код. Нажмите «Войти» ещё раз.', 'error');
+        }
+        if (alive()) schedule(every);
+      }
+
+      async function send() {
+        const code = input.value;
+        if (done || confirming || ui.tg !== t || code.length !== n || Date.now() < holdUntil) return;
+        confirming = true;
+        hideCodeErr();
+        field.classList.remove('err');
+        input.readOnly = true;
+        submit.disabled = true;
+        submit.classList.add('loading');
+        submit.innerHTML = `${spinner}Проверяем код…`;
+        let ok = false;
+        let failed = null;
+        try {
+          ok = (await api.confirmLogin(t.challengeId, code)).status === 'ok';
+        } catch (e) {
+          failed = e;
+        }
+        if (done || ui.tg !== t) return; // начали другой вход или ушли со входа — этот ответ уже не нужен
+        if (!el.isConnected) {
+          // Пока код проверялся, пользователь ушёл с экрана. Вход всё равно состоялся — открываем приложение.
+          confirming = false;
+          if (ok) tgSignedIn();
+          return;
+        }
+        if (failed) return confirmFailed(failed);
+        confirming = false;
+        if (ok) signedIn();
+        else confirmFailed(new ApiError('server_error'));
+      }
+
+      schedule(every);
+      if (demo && !t.botShown) {
+        t.botShown = true;
+        setTimeout(() => alive() && demoBotSheet(), 650);
+      } else if (!demo) {
+        // На компьютере курсор сразу в поле; на телефоне клавиатура без нажатия не откроется — и не нужно.
+        setTimeout(() => alive() && !sheetOpen() && input.focus({ preventScroll: true }), 420);
+      }
+    },
+  };
+}
+
+// ----------------------------------------------------------------------------------------------------------------
+// ВРЕМЕННО, переходный период. Сервер прежней схемы отвечает на start числом match_code: его показываем крупно,
+// пользователь выбирает его в боте, токены приходят из опроса. Нужен, пока на рабочем сервере не включён вход по
+// коду, — чтобы приложение и сервер можно было выкладывать не одновременно. После выкладки сервера удалить:
+// эту функцию, ветки «ВРЕМЕННО» в api/server.js (startLogin, pollLogin) и стиль .tg-code.
+// ----------------------------------------------------------------------------------------------------------------
+function telegramMatch(t) {
+  const open = `<a class="btn ${t.opened ? 'btn-ghost-dark' : 'btn-primary'} btn-block" href="${H(t.botUrl)}" target="_blank" rel="noopener noreferrer" data-tg-open>${I.tg}${t.opened ? 'Открыть Telegram ещё раз' : 'Открыть Telegram'}</a>`;
   return {
     key: 'telegram', depth: 1, theme: 'dark', title: 'Вход через Telegram',
     html: `<header class="topbar topbar-dark"><button class="tb-btn" data-back="#/login" aria-label="Назад">${I.chevL}</button><div class="tb-title"></div><div class="tb-right"></div></header>
@@ -362,13 +739,10 @@ views.telegram = async () => {
         clearInterval(tick);
         document.removeEventListener('visibilitychange', soon);
         window.removeEventListener('focus', soon);
-        window.removeEventListener('tg-poll', soon);
       };
       document.addEventListener('visibilitychange', soon);
       window.addEventListener('focus', soon);
-      window.addEventListener('tg-poll', soon);
 
-      // Вход не удался: текст сервера и «Начать заново» (при блокировке — с таймером).
       const fail = (msg, { wait = 0, kind = '' } = {}) => {
         stop();
         el.querySelector('[data-tg-code]').classList.add('off');
@@ -376,21 +750,7 @@ views.telegram = async () => {
         err.hidden = false;
         err.dataset.kind = kind;
         err.innerHTML = `${I.alert}<span>${msg}</span>`;
-        acts.innerHTML = '<button class="btn btn-primary btn-block" data-act="tg-start" data-restart><span>Начать заново</span></button>';
-        if (wait > 0) {
-          const btn = acts.querySelector('[data-restart]');
-          const until = Date.now() + wait * 1000;
-          const draw = () => {
-            const s = Math.ceil((until - Date.now()) / 1000);
-            btn.disabled = s > 0;
-            btn.querySelector('span').textContent = s > 0 ? `Начать заново через ${mmss(s)}` : 'Начать заново';
-            return s;
-          };
-          draw();
-          const tt = setInterval(() => {
-            if (!el.isConnected || draw() <= 0) clearInterval(tt);
-          }, 1000);
-        }
+        tgRestart(el, acts, wait);
       };
       const msg = (e, fallback) => H((e && e.message) || fallback);
 
@@ -433,15 +793,10 @@ views.telegram = async () => {
         if (!alive()) return;
         if (r.status === 'ok') {
           stop();
-          ui.tg = null;
-          storage.remove(TG_BLOCK_KEY);
           el.querySelector('[data-tg-code]').classList.add('ok');
           status.classList.add('ok');
           status.innerHTML = `${I.check}<span>Вход подтверждён</span>`;
-          closeSheet();
-          invalidate();
-          syncPush();
-          setTimeout(() => navigate('#/orgs', 'push'), 450);
+          tgSignedIn();
           return;
         }
         text.innerHTML = `Ждём подтверждения в${NB}Telegram`;
@@ -449,42 +804,68 @@ views.telegram = async () => {
       }
 
       schedule(every);
-      if (demo && !t.botShown) {
-        t.botShown = true;
-        setTimeout(() => alive() && demoBotSheet(), 650);
-      }
     },
   };
-};
+}
 
-// Демо: «бот SmartSol» в шторке — то же, что пользователь увидит в Telegram.
+// Демо: «бот SmartSol» в шторке — то же, что пользователь увидит в Telegram. Тексты — как у настоящего бота.
+const tgBotHead = `<div class="tgbot-head"><span class="tgbot-ava">${I.tg}</span><div><b>SmartSol</b><small>бот · демо</small></div></div>`;
+const TG_ASK = 'Вход в ФинПульс. Нажмите «Поделиться номером» — проверим, что ваш номер подключён к ФинПульсу.';
+
+// Сообщение с кодом: «Код для входа в ФинПульс: 483921», код моноширинный и копируется нажатием.
+function tgBotCode(s) {
+  const min = `${s.minutes} ${plural(s.minutes, ['минуту', 'минуты', 'минут'])}`;
+  return `<div class="tgbot-msg" data-tgbot-code>Код для входа в ФинПульс: <button class="tgbot-code" type="button" data-act="tg-demo-copy" data-v="${H(s.code)}" aria-label="Скопировать код ${H(s.code)}">${H(s.code)}</button><br>
+    Действует ${min}. Вводите только на ${H(s.site)}. Никому не называйте этот код. Если вход начали не вы — просто проигнорируйте сообщение.</div>`;
+}
+
+function tgBotBody(s, before = '') {
+  if (s.step === 'contact') {
+    return `<div class="tgbot-msg">${TG_ASK}</div>
+      <div class="tgbot-btns one"><button class="tgbot-btn" data-act="tg-demo-share">Поделиться номером</button></div>`;
+  }
+  if (s.step === 'blocked') return `<div class="tgbot-msg">Слишком много попыток. Попробуйте через ${s.minutes} мин.</div>`;
+  return `${before}${tgBotCode(s)}${s.step === 'again' ? '<div class="tgbot-msg">Код уже отправлен — он выше в этом чате. Если не нашли, начните вход в приложении заново.</div>' : ''}`;
+}
+
+const tgBotSheet = (s, before = '') => `<div class="tgbot">${tgBotHead}${tgBotBody(s, before)}</div>
+    <p class="sheet-note">${I.info}${s.step === 'contact' ? 'Демо: так выглядит бот в Telegram' : s.step === 'blocked' ? 'Демо: блокировка снимется сама' : 'Демо: нажмите на код — он скопируется'}</p>
+    <button class="btn btn-text btn-block" data-act="sheet-close">Вернуться в приложение</button>`;
+
 function demoBotSheet() {
-  const opts = api.demoBotOptions();
-  if (!opts.length) return;
-  openSheet(`<div class="tgbot">
-      <div class="tgbot-head"><span class="tgbot-ava">${I.tg}</span><div><b>SmartSol</b><small>бот · демо</small></div></div>
-      <div class="tgbot-msg">Вход в ФинПульс. Выберите число, которое видите в приложении.
-        <small>Если вы сейчас не входите в приложение — ничего не нажимайте и никому не называйте числа.</small></div>
-      <div class="tgbot-btns">${opts.map((o) => `<button class="tgbot-btn" data-act="tg-demo-pick" data-v="${H(o)}">${H(o)}</button>`).join('')}</div>
-    </div>
-    <p class="sheet-note">${I.info}Демо: так выглядит бот в Telegram</p>
-    <button class="btn btn-text btn-block" data-act="sheet-close">Свернуть</button>`);
+  const s = api.demoBotOpen();
+  if (s.step === 'none') return;
+  openSheet(tgBotSheet(s));
+  if (s.code) window.dispatchEvent(new Event('tg-poll'));
 }
 
 actions['tg-demo-bot'] = () => demoBotSheet();
 
-actions['tg-demo-pick'] = async (b) => {
-  const right = ui.tg && b.dataset.v === ui.tg.matchCode;
-  await api.demoBotPick(b.dataset.v);
-  setSheet(`<div class="tgbot">
-      <div class="tgbot-head"><span class="tgbot-ava">${I.tg}</span><div><b>SmartSol</b><small>бот · демо</small></div></div>
-      <div class="tgbot-msg mine">${H(b.dataset.v)}</div>
-      <div class="tgbot-msg">${right ? 'Готово, вернитесь в приложение.' : 'Выбрано другое число — вход отклонён. Начните вход в приложении заново.'}</div>
-    </div>`);
+// «Поделиться номером» (только при первом входе): контакт уходит боту, бот присылает код.
+actions['tg-demo-share'] = () => {
+  const s = api.demoBotShare();
+  if (s.step === 'none') return closeSheet();
+  setSheet(tgBotSheet(s, `<div class="tgbot-msg">${TG_ASK}</div>
+    <div class="tgbot-msg mine">${I.user}Мой номер${s.phone ? `<small>${H(s.phone)}</small>` : ''}</div>
+    <div class="tgbot-msg">Номер получен, проверяю доступ…</div>`));
+  window.dispatchEvent(new Event('tg-poll'));
+};
+
+// Нажатие на код в сообщении бота: код в буфере (как в Telegram) — и назад в приложение, к полю ввода.
+actions['tg-demo-copy'] = (b) => {
+  const code = b.dataset.v;
+  if (ui.tg) ui.tg.demoClip = code; // для кнопки «Вставить код», если браузер не дал доступ к буферу
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(code).catch(() => {});
+  } catch (e) {
+    /* буфер недоступен — код вставится из памяти демо */
+  }
+  b.classList.add('copied');
+  toast('Код скопирован');
   setTimeout(() => {
     closeSheet();
     window.dispatchEvent(new Event('tg-poll'));
-  }, 900);
+  }, 700);
 };
 
 // ======================================================================
@@ -1046,6 +1427,19 @@ function routeStep(s, today) {
   </li>`;
 }
 
+// Бюджет основной статьи заявки: сколько из заявки приходится на статью и на сколько превышен лимит.
+//  part  — доля заявки по статье (budget.request, в контракте this_request); нет поля — вся сумма заявки;
+//  over  — превышение: как посчитал учёт (budget.overBy, в контракте over_by), иначе от доли: used + part − limit;
+//  split — у заявки несколько статей, доля меньше суммы заявки.
+function budgetUse(r) {
+  const b = r.budget;
+  if (!b || !(b.limit > 0)) return { part: 0, split: false, after: 0, over: 0 };
+  const part = b.request != null ? b.request : r.amount;
+  const after = b.used + part;
+  const over = Math.max(0, b.overBy != null ? b.overBy : after - b.limit);
+  return { part, split: part !== r.amount, after, over };
+}
+
 async function requestDetail(id) {
   let r;
   try {
@@ -1064,24 +1458,26 @@ async function requestDetail(id) {
   const b = r.budget;
   let budget = '';
   if (b && b.limit > 0) {
-    const after = b.used + r.amount;
-    const over = after - b.limit;
+    // Считаем от доли заявки по этой статье, а не от всей суммы: у заявки с несколькими статьями они разные.
+    const { part, split, after, over } = budgetUse(r);
+    const article = b.article || r.article;
     const scale = Math.max(b.limit, after);
     const pct = (v) => ((v / scale) * 100).toFixed(2);
-    budget = `<section class="card budget ${over > 0 ? 'is-over' : ''}">
-        <div class="card-head"><h2>Бюджет статьи</h2><span class="muted">${H(r.article)}${b.period ? ` · ${H(b.period)}` : ''}</span></div>
+    budget = `<section class="card budget ${over > 0 ? 'is-over' : ''}" data-budget data-part="${part}" data-over="${over}">
+        <div class="card-head"><h2>Бюджет статьи</h2><span class="muted">${H(article)}${b.period ? ` · ${H(b.period)}` : ''}</span></div>
         <div class="bud-bar">
           <div class="bud-track">
             <i class="bud-used" style="width:${pct(b.used)}%"></i>
-            <i class="bud-req" style="left:${pct(b.used)}%;width:${pct(r.amount)}%"></i>
+            <i class="bud-req" style="left:${pct(b.used)}%;width:${pct(part)}%"></i>
           </div>
           <span class="bud-limit" style="left:${pct(b.limit)}%"><small>лимит</small></span>
         </div>
         <div class="bud-legend">
           <span><i class="sw sw-ink"></i>Израсходовано<b>${money(b.used)}</b></span>
-          <span><i class="sw ${over > 0 ? 'sw-coral' : 'sw-lav'}"></i>Эта заявка<b>${money(r.amount)}</b></span>
+          <span><i class="sw ${over > 0 ? 'sw-coral' : 'sw-lav'}"></i>${split ? 'По статье' : 'Эта заявка'}<b>${money(part)}</b></span>
           <span><i class="sw sw-limit"></i>Лимит<b>${money(b.limit)}</b></span>
         </div>
+        ${split ? `<p class="bud-split" data-bud-split>${I.info}<span>В${NB}заявке несколько статей. На${NB}эту статью из${NB}${money(r.amount)} приходится ${money(part)}.</span></p>` : ''}
         ${over > 0
     ? `<div class="over-note">${I.alert}<div><b>Превышение лимита на ${money(over)}</b><span>+${Math.round((over / b.limit) * 100)}% к бюджету статьи${b.period ? ` на ${H(b.period)}` : ''}. Согласование пройдёт сверх лимита.</span></div></div>`
     : `<div class="ok-note">${I.check}<span>В пределах лимита. Останется ${money(b.limit - after)}</span></div>`}
@@ -1200,12 +1596,12 @@ actions['open-pdf'] = async (t) => {
 actions.approve = () => {
   const r = ui.request;
   if (!r) return;
-  const over = r.budget ? Math.max(0, r.budget.used + r.amount - r.budget.limit) : 0;
+  const { over } = budgetUse(r);
   ui.decision = null;
   openSheet(`<div class="sheet-title">Согласовать оплату?</div>
     <div class="confirm-sum">${money(r.amount)}</div>
     <p class="confirm-sub">${H(r.contractor)} · до ${dayMonth(D(r.due))}</p>
-    ${over ? `<div class="over-note compact">${I.alert}<div><b>Сверх лимита на ${money(over)}</b><span>Статья «${H(r.article)}»</span></div></div>` : ''}
+    ${over ? `<div class="over-note compact">${I.alert}<div><b>Сверх лимита на ${money(over)}</b><span>Статья «${H((r.budget && r.budget.article) || r.article)}»</span></div></div>` : ''}
     <div class="sheet-actions">
       <button class="btn btn-primary btn-block" data-act="approve-confirm">Да, согласовать</button>
       <button class="btn btn-text btn-block" data-act="sheet-close">Отмена</button>
@@ -1809,19 +2205,27 @@ views.profile = async () => {
 
       <div class="about">
         ${logoMark(28)}
-        <span>ФинПульс 1.0${isDemo() ? ' · демо-версия<br>Все данные выдуманы' : '<br>Данные — из 1С в момент запроса'}</span>
+        <span>ФинПульс ${H(CONFIG.appVersion.split('.').slice(0, 2).join('.'))}${isDemo() ? ' · демо-версия<br>Все данные выдуманы' : '<br>Данные — из 1С в момент запроса'}</span>
         <span class="about-brand">SmartSol × FINTAX CONSULT</span>
       </div>
     </div>`,
   };
 };
 
+// Переключение организации в профиле. Список организаций, настройки и пользователь от выбранной организации не
+// зависят — профиль с сервера не перечитываем (раньше каждое нажатие давало GET /orgs, /me и /me/settings),
+// только переставляем отметку. Данные новой организации загрузятся, когда откроют её экраны.
 actions['switch-org'] = (t) => {
   if (api.orgId() === t.dataset.id) return;
   api.setOrgId(t.dataset.id);
   invalidate();
   nav.badge = null;
-  nav.rerender();
+  const list = t.closest('.list');
+  (list ? [...list.querySelectorAll('[data-act="switch-org"]')] : []).forEach((b) => {
+    const mark = b.querySelector('.li-check, .li-radio');
+    if (mark) mark.outerHTML = b === t ? `<span class="li-check">${I.check}</span>` : '<span class="li-radio"></span>';
+  });
+  document.querySelector('.tabbar .tab-badge')?.remove(); // число заявок прежней организации
   toast('Организация переключена');
 };
 
@@ -1874,7 +2278,7 @@ actions.logout = async () => {
 
 actions['logout-all'] = () => {
   openSheet(`<div class="sheet-title">Выйти со всех устройств?</div>
-    <p class="sheet-sub">Вход закроется на всех телефонах и компьютерах, уведомления на них перестанут приходить. Чтобы войти снова, понадобится код из WhatsApp.</p>
+    <p class="sheet-sub">Вход закроется на всех телефонах и компьютерах, уведомления на них перестанут приходить. Чтобы войти снова, понадобится код из Telegram.</p>
     <div class="sheet-actions">
       <button class="btn btn-danger btn-block" data-act="logout-all-confirm" data-label="Выйти везде">Выйти везде</button>
       <button class="btn btn-text btn-block" data-act="sheet-close">Отмена</button>

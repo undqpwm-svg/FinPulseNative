@@ -2,7 +2,7 @@
 // Это переходник: запросы — как в контракте, ответы переводятся в DTO, которые ждут экраны (spec/api-client.md).
 // Экраны о контракте не знают: поменяется контракт — правится только этот файл.
 import { CONFIG } from '../config.js';
-import { ApiError, storage } from './core.js';
+import { ApiError, storage, once, forgetInflight } from './core.js';
 
 // ---------- сессия ----------
 // access-токен (15 мин) — только в памяти. refresh-токен — в cookie HttpOnly fp_refresh: приложение его не видит и
@@ -36,6 +36,7 @@ function saveTokens(r, user) {
 export function clearSession() {
   access = null;
   orgsCache = null;
+  forgetInflight();
   storage.remove(SESSION_KEY);
   storage.remove(ORG_KEY);
   storage.remove(DEVICE_KEY);
@@ -145,20 +146,24 @@ async function authed(method, path, opts = {}) {
   return res;
 }
 
-const getJSON = async (path) => (await authed('GET', path)).json();
+// Чтение: одинаковые GET склеиваются — пока первый не ответил, второй такой же в сеть не уходит (core.once).
+// Экраны получают один и тот же разобранный ответ и его не меняют. POST/PUT/DELETE идут мимо, напрямую через authed.
+const getJSON = (path) => once(`GET ${path}`, async () => (await authed('GET', path)).json());
 const enc = encodeURIComponent;
 const qs = (o) => Object.entries(o).filter(([, v]) => v !== undefined && v !== null && v !== '').map(([k, v]) => `${k}=${enc(v)}`).join('&');
 
 // ---------- запуск: версия API, ключ Web Push ----------
 // Ошибка связи при запуске не мешает открыть вход; устаревшая версия приложения — мешает (426 app_outdated).
 export async function init() {
-  if (versionInfo) return;
-  try {
-    const res = await send('GET', '/version');
-    if (!res.ok) return;
-    versionInfo = await res.json();
-  } catch (e) {
-    return;
+  if (!versionInfo) {
+    try {
+      versionInfo = await once('GET /version', async () => {
+        const res = await send('GET', '/version');
+        return res.ok ? res.json() : null;
+      });
+    } catch (e) {
+      return;
+    }
   }
   if (versionInfo && cmpVersion(CONFIG.appVersion, versionInfo.min_app_version) < 0) {
     throw new ApiError('app_outdated', 'Версия приложения устарела — обновите страницу или переустановите приложение');
@@ -191,30 +196,60 @@ export function session_() {
   return s ? { token: access && access.token, user: userDto(s.user) } : null;
 }
 
-// Вход через Telegram-бота (2.1): число для сверки и ссылка на бота. Тело пустое — {}.
+// Вход через Telegram-бота (2.1): ссылка на бота и длина кода. Тело пустое — {}.
+// Самого кода в ответе нет: его присылает бот, приложение его не знает.
 export async function startLogin() {
   const res = await send('POST', '/auth/telegram/start', { body: {} });
   if (!res.ok) throw await toError(res);
   const r = await res.json();
-  return {
+  const dto = {
     challengeId: r.challenge_id,
     botUrl: r.bot_url, // имя бота задаёт сервер — ссылку не собираем сами
-    matchCode: String(r.match_code ?? ''),
+    codeLength: Math.max(0, Math.min(12, Math.trunc(Number(r.code_length)) || 0)),
     expiresIn: Number(r.expires_in) || 300,
     pollInterval: Math.max(1, Number(r.poll_interval) || 2),
   };
+  // ВРЕМЕННО, переходный период: сервер прежней схемы отвечает match_code (число для выбора в боте) без code_length.
+  // Тогда экран показывает число и ждёт токены от опроса. Убрать вместе с telegramMatch в screens.js, когда на
+  // рабочем сервере заработает вход по коду.
+  if (!dto.codeLength && r.match_code !== undefined && r.match_code !== null) dto.matchCode = String(r.match_code);
+  // Ни длины кода, ни числа — показывать нечего: не открываем пустой экран, просим повторить.
+  if (!dto.challengeId || (!dto.codeLength && dto.matchCode === undefined)) throw new ApiError('server_error', 'Сервер не сообщил, как подтвердить вход');
+  return dto;
 }
 
-// Опрос (2.2): 202 — ещё не подтвердили; 200 — вход, refresh-токен пришёл в cookie (credentials: 'include').
-// Ошибки — ApiError: access_revoked, challenge_rejected (details.reason), challenge_expired, too_many_requests,
-// not_found, upstream_unavailable (503 source_unavailable — вход отменён).
+// Опрос (2.1.1): токенов не выдаёт. 202 pending — бот ещё не прислал код; 202 code_sent — прислал, expires_in —
+// сколько секунд код ещё действует. Отказы — ApiError: access_revoked, challenge_rejected (details.reason: wrong_code |
+// blocked), challenge_expired, too_many_requests, not_found, upstream_unavailable (503 source_unavailable — вход отменён).
 export async function pollLogin(challengeId) {
   const res = await send('POST', '/auth/telegram/poll', { body: { challenge_id: challengeId } });
-  if (res.status === 202) return { status: 'pending' };
   if (!res.ok) throw await toError(res);
-  const r = await res.json();
-  if (!r.access_token) throw new ApiError('server_error', 'Сервер не выдал сессию');
+  let r = null;
+  try {
+    r = await res.json();
+  } catch (e) {
+    r = null;
+  }
+  // ВРЕМЕННО, переходный период: сервер прежней схемы на опрос отвечает 200 с токенами (вход подтверждён в боте).
+  if (res.status === 200 && r && r.access_token) return signIn(r);
+  if (r && r.status === 'code_sent') return { status: 'code_sent', expiresIn: Number(r.expires_in) || 0 };
+  return { status: 'pending' };
+}
+
+// Ввод кода (2.2): 200 — вход, refresh-токен пришёл в cookie (credentials: 'include' — у всех /auth/*).
+// Ошибки — ApiError: code_invalid (details.attemptsLeft), code_not_sent, challenge_rejected, challenge_expired,
+// access_revoked, validation_error, too_many_requests (retryAfter), not_found, upstream_unavailable.
+// Код уходит только в теле этого запроса: в хранилище браузера и в журнал он не попадает.
+export async function confirmLogin(challengeId, code) {
+  const res = await send('POST', '/auth/telegram/confirm', { body: { challenge_id: challengeId, code: String(code) } });
+  if (!res.ok) throw await toError(res);
+  return signIn(await res.json());
+}
+
+function signIn(r) {
+  if (!r || !r.access_token) throw new ApiError('server_error', 'Сервер не выдал сессию');
   orgsCache = null;
+  forgetInflight();
   saveTokens(r, r.user);
   return { status: 'ok', session: session_() };
 }
@@ -432,8 +467,18 @@ function cardDto(r) {
     payFrom: r.pay_from ? [r.pay_from.name, r.pay_from.number_masked].filter(Boolean).join(' · ') : null,
     createdAt: r.created_at,
     comment: r.comment || '',
-    // «Израсходовано» на экране — spent + approved_requests (контракт, 6.2)
-    budget: b && b.has_limit ? { period: monthName(b.month), limit: b.limit, used: (b.spent || 0) + (b.approved_requests || 0) } : null,
+    // Бюджет основной статьи (контракт, 6.2). «Израсходовано» на экране — spent + approved_requests.
+    // request — доля этой заявки по статье (this_request): у заявки с несколькими статьями она меньше суммы заявки.
+    // overBy — превышение, как его посчитал учёт (over_by); нет поля — экран считает сам от доли.
+    budget: b && b.has_limit ? {
+      article: b.article || r.article || '',
+      period: monthName(b.month),
+      limit: b.limit,
+      used: (b.spent || 0) + (b.approved_requests || 0),
+      request: b.this_request != null ? b.this_request : null,
+      overBy: b.over_by != null ? b.over_by : null,
+    } : null,
+    articles: (r.lines || []).length,
     impact: r.impact ? { date: r.impact.date, before: r.impact.closing_before, after: r.impact.closing_after, inCalendar: !!r.impact.in_calendar } : null,
     attachments: (r.files || []).map((f) => ({ id: f.id, name: f.name, size: sizeText(f.size), kind: 'pdf', contentType: f.content_type })),
     route: (r.route || []).map(routeStep),
@@ -446,17 +491,22 @@ export const request_ = async (id, reqId) => cardDto(await getCard(id, reqId));
 
 // Файл вложения (6.3) — потоком с авторизацией → object URL для просмотра.
 export async function attachment(id, reqId, fileId) {
-  const res = await authed('GET', orgPath(id, `/requests/${enc(reqId)}/files/${enc(fileId)}`), { headers: { Accept: '*/*' } });
-  const blob = await res.blob();
-  const disp = res.headers.get('Content-Disposition') || '';
-  const m = disp.match(/filename\*=UTF-8''([^;]+)/i);
-  let name = fileId;
-  try {
-    if (m) name = decodeURIComponent(m[1]);
-  } catch (e) {
-    /* имя как есть */
-  }
-  return { kind: 'pdf', url: URL.createObjectURL(blob), name };
+  const path = orgPath(id, `/requests/${enc(reqId)}/files/${enc(fileId)}`);
+  // Повторное нажатие, пока файл едет из 1С, второго скачивания не запускает.
+  const f = await once(`GET ${path}`, async () => {
+    const res = await authed('GET', path, { headers: { Accept: '*/*' } });
+    const blob = await res.blob();
+    const disp = res.headers.get('Content-Disposition') || '';
+    const m = disp.match(/filename\*=UTF-8''([^;]+)/i);
+    let name = fileId;
+    try {
+      if (m) name = decodeURIComponent(m[1]);
+    } catch (e) {
+      /* имя как есть */
+    }
+    return { blob, name };
+  });
+  return { kind: 'pdf', url: URL.createObjectURL(f.blob), name: f.name };
 }
 
 // Решение (6.4–6.7): approve / reject / return. Ответ — обновлённая карточка.

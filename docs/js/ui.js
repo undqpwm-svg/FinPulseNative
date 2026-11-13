@@ -8,6 +8,7 @@ export const nav = {
   pendingDir: null,
   route: () => {},
   rerender: () => {},
+  revisit: () => {}, // повторный переход на уже открытый адрес (app.js): пока экран грузится — без новой загрузки
   badge: null, // число заявок на согласовании для вкладки (известно из последнего ответа сервера)
 };
 
@@ -16,7 +17,7 @@ export const histIdx = () => (history.state && history.state.idx) || 0;
 
 export function navigate(hash, dir) {
   if (location.hash === hash) {
-    nav.rerender();
+    nav.revisit();
     return;
   }
   nav.pendingDir = dir || null;

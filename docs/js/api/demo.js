@@ -22,55 +22,99 @@ export function session_() {
   return S.state.auth.logged ? { token: 'demo', expiresAt: null, user: userDto() } : null;
 }
 
-// Вход через Telegram — имитация сценария контракта (2): число, «бот» с тремя кнопками (шторка в приложении),
-// опрос. Верное число — вход; неверное — challenge_rejected (wrong_number), третье неверное подряд — blocked на 15 мин.
-// Состояние — в памяти: перезагрузка страницы сбрасывает блокировку демо.
-const tg = { ch: null, wrong: 0, blockedUntil: 0 };
+// Вход через Telegram — имитация сценария контракта (2): «бот» (шторка в приложении) присылает одноразовый код тем же
+// текстом, что настоящий, пользователь вводит его на экране входа. Неверный код — code_invalid с числом оставшихся
+// попыток, пятый — challenge_rejected (wrong_code), три таких входа подряд — blocked на 15 минут.
+// Состояние — в памяти: перезагрузка страницы сбрасывает блокировку демо. Код нигде не сохраняется.
+const CODE_LENGTH = 6;
+const CODE_TTL = 300; // секунд — как на сервере
+const TRIES = 5;
+const tg = { ch: null, rejected: 0, blockedUntil: 0, shared: false };
+
+function newCode() {
+  let c = '';
+  for (let i = 0; i < CODE_LENGTH; i++) c += Math.floor(Math.random() * 10);
+  return c;
+}
 
 export async function startLogin() {
   await wait(350);
-  const code = String(10 + Math.floor(Math.random() * 90));
-  tg.ch = { id: `demo_${Date.now()}`, code, picked: null, until: Date.now() + 300e3 };
-  return { challengeId: tg.ch.id, botUrl: null, matchCode: code, expiresIn: 300, pollInterval: 2, demoBot: true };
+  tg.ch = { id: `demo_${Date.now()}`, code: newCode(), sentAt: 0, opens: 0, triesLeft: TRIES, until: Date.now() + CODE_TTL * 1000 };
+  return { challengeId: tg.ch.id, botUrl: null, codeLength: CODE_LENGTH, expiresIn: CODE_TTL, pollInterval: 2, demoBot: true };
 }
 
-// Что «бот» показывает: верное число и два других, в случайном порядке.
-export function demoBotOptions() {
-  if (!tg.ch) return [];
-  const set = new Set([tg.ch.code]);
-  while (set.size < 3) set.add(String(10 + Math.floor(Math.random() * 90)));
-  return [...set].sort(() => Math.random() - 0.5);
+const sendCode = (ch) => {
+  ch.sentAt = Date.now();
+  ch.until = ch.sentAt + CODE_TTL * 1000; // код живёт 5 минут с момента, когда бот его прислал
+};
+
+// Что показывает «бот», когда его открыли по ссылке входа:
+//  contact — первый вход с этого аккаунта: просит «Поделиться номером»;
+//  code    — прислал код (текст сообщения — как у настоящего бота);
+//  again   — ссылку открыли ещё раз: код не повторяется, «он выше в этом чате»;
+//  blocked — слишком много попыток; none — входа нет.
+export function demoBotOpen() {
+  const ch = tg.ch;
+  if (!ch) return { step: 'none' };
+  if (tg.blockedUntil > Date.now()) return { step: 'blocked', minutes: Math.ceil((tg.blockedUntil - Date.now()) / 60000) };
+  if (!tg.shared) return { step: 'contact' };
+  ch.opens++;
+  if (!ch.sentAt) sendCode(ch);
+  return { step: ch.opens > 1 ? 'again' : 'code', code: ch.code, site: 'finpulse.smartsol.pro', minutes: CODE_TTL / 60 };
 }
 
-export async function demoBotPick(code) {
-  if (tg.ch) tg.ch.picked = String(code);
+// «Поделиться номером» в боте — дальше бот этого аккаунта номер не спрашивает (до перезагрузки страницы).
+export function demoBotShare() {
+  tg.shared = true;
+  return { ...demoBotOpen(), phone: S.data.user.phone };
 }
 
-const rejected = (reason, message, retry) => new ApiError('challenge_rejected', message,
-  { reason, contractCode: 'challenge_rejected', ...(retry ? { retry_after: retry } : {}) }, 409, retry || 0);
+const loginError = (status, code, message, details = {}, retry = 0) => new ApiError(code, message, { ...details, contractCode: code }, status, retry);
+const rejected = (reason, message, retry) => loginError(409, 'challenge_rejected', message, { reason, ...(retry ? { retry_after: retry } : {}) }, retry || 0);
+const blockedError = () => {
+  const left = Math.ceil((tg.blockedUntil - Date.now()) / 1000);
+  return rejected('blocked', `Слишком много попыток входа. Попробуйте через ${Math.max(1, Math.ceil(left / 60))} мин.`, left);
+};
+
+function challenge(challengeId) {
+  const ch = tg.ch;
+  if (!ch || ch.id !== challengeId) throw loginError(404, 'not_found', 'Вход не найден');
+  if (tg.blockedUntil > Date.now()) throw blockedError();
+  if (Date.now() > ch.until) {
+    tg.ch = null;
+    throw loginError(410, 'challenge_expired', 'Время входа вышло. Начните вход заново.');
+  }
+  return ch;
+}
 
 export async function pollLogin(challengeId) {
   await wait(150);
-  const ch = tg.ch;
-  if (!ch || ch.id !== challengeId) throw new ApiError('not_found', 'Вход не найден', { contractCode: 'not_found' }, 404);
-  if (tg.blockedUntil > Date.now()) {
-    throw rejected('blocked', 'Слишком много неверных попыток. Вход через Telegram заблокирован на 15 минут.', Math.ceil((tg.blockedUntil - Date.now()) / 1000));
-  }
-  if (!ch.picked) {
-    if (Date.now() > ch.until + 30e3) throw new ApiError('challenge_expired', 'Время входа истекло. Начните заново.', { contractCode: 'challenge_expired' }, 410);
-    return { status: 'pending' };
+  const ch = challenge(challengeId);
+  return ch.sentAt ? { status: 'code_sent', expiresIn: Math.max(0, Math.ceil((ch.until - Date.now()) / 1000)) } : { status: 'pending' };
+}
+
+export async function confirmLogin(challengeId, code) {
+  await wait(450);
+  const ch = challenge(challengeId);
+  const entered = String(code || '').replace(/[\s-]/g, '');
+  if (entered.length !== CODE_LENGTH || /[^0-9]/.test(entered)) throw loginError(422, 'validation_error', `Код — ${CODE_LENGTH} цифр.`);
+  if (!ch.sentAt) throw loginError(409, 'code_not_sent', 'Код ещё не отправлен. Откройте Telegram — бот пришлёт код.');
+  if (entered !== ch.code) {
+    ch.triesLeft--;
+    if (ch.triesLeft > 0) {
+      throw loginError(422, 'code_invalid', `Неверный код. Осталось попыток: ${ch.triesLeft}.`, { attempts_left: ch.triesLeft, attemptsLeft: ch.triesLeft });
+    }
+    tg.ch = null;
+    tg.rejected++;
+    if (tg.rejected >= 3) {
+      tg.rejected = 0;
+      tg.blockedUntil = Date.now() + 900e3;
+      throw blockedError();
+    }
+    throw rejected('wrong_code', 'Код введён неверно несколько раз. Начните вход заново.');
   }
   tg.ch = null;
-  if (ch.picked !== ch.code) {
-    tg.wrong++;
-    if (tg.wrong >= 3) {
-      tg.wrong = 0;
-      tg.blockedUntil = Date.now() + 900e3;
-      throw rejected('blocked', 'Три раза подряд выбрано неверное число. Вход через Telegram заблокирован на 15 минут.', 900);
-    }
-    throw rejected('wrong_number', 'В Telegram выбрано другое число. Начните вход заново.');
-  }
-  tg.wrong = 0;
+  tg.rejected = 0;
   S.login(S.data.user.phone);
   return { status: 'ok', session: session_() };
 }
@@ -209,7 +253,9 @@ export async function request_(id, reqId) {
     payFrom: r.payFrom,
     createdAt: stampIso(r.created.d, r.created.t),
     comment: r.comment,
-    budget: { period: r.budget.period, limit: r.budget.limit, used: r.budget.used },
+    // Как в ответе сервера: доля заявки по основной статье (this_request) и превышение лимита (over_by).
+    budget: { article: r.article, period: r.budget.period, limit: r.budget.limit, used: r.budget.used, request: S.budgetPart(r), overBy: S.overLimit(r) },
+    articles: (r.lines || []).length || 1,
     impact,
     attachments: [{ id: 'invoice', name: r.attachment.file, size: r.attachment.size, kind: 'invoice' }],
     route,

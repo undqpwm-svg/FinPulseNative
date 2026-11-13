@@ -2,6 +2,7 @@
 // iOS: push работает только у приложения, добавленного на экран «Домой» (iOS 16.4+).
 import { api, isDemo } from './api/index.js';
 import { storage } from './api/core.js';
+import { isTestEnv } from './config.js';
 
 const ASKED_KEY = 'finpuls-push-asked';
 
@@ -16,6 +17,9 @@ const supported = () => 'serviceWorker' in navigator && 'PushManager' in window 
 //  granted       — разрешено;
 //  denied        — запрещено (включается только в настройках телефона).
 export function pushState() {
+  // Тестовый сервер (?api=test): подписка push у телефона одна на сайт, и она принадлежит рабочему серверу.
+  // Тестовая вкладка её не читает, не отправляет на тестовый сервер и не отменяет при выходе.
+  if (isTestEnv()) return 'unsupported';
   if (isIOS() && !isStandalone()) return 'needs-install';
   if (!supported()) return 'unsupported';
   return Notification.permission;
@@ -93,6 +97,7 @@ export async function syncPush() {
 
 // При выходе: перестать получать push этого пользователя на этом устройстве.
 export async function disablePush() {
+  if (isTestEnv()) return;
   try {
     const reg = await existing();
     const sub = reg && (await reg.pushManager.getSubscription());

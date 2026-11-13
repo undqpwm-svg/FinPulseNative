@@ -111,33 +111,49 @@ async function runFlow(browser, name, opts, isPhone) {
   await page.locator('[data-act="mode-demo"]').click();
   await settle(page, 700);
   ok((await page.locator('.login-hint').innerText().then(norm)).includes('Демо'), 'включён демо-режим');
-  // неверное число → challenge_rejected (wrong_number) → «Начать заново»
+  // вход по коду: «бот» просит номер (первый вход), присылает код тем же текстом, что настоящий
   await tap(page, '[data-act="tg-start"]');
   await settle(page, 1300);
-  ok((await screenKey(page)) === '#/telegram', 'экран «Выберите в Telegram число»');
-  const code1 = (await page.locator('.screen:not(.leaving) [data-tg-code]').innerText()).trim();
-  ok(/^\d{2}$/.test(code1), `крупное двузначное число (${code1})`);
-  ok(await page.locator('.sheet-wrap .tgbot-btn').count() === 3, 'демо-бот: три кнопки с числами');
-  ok((await page.locator('.sheet-wrap .tgbot-btn').allInnerTexts()).map((x) => x.trim()).includes(code1), 'среди кнопок бота — число с экрана');
-  if (isPhone) await shot(page, '02a-demo-bot');
-  const wrong = await page.locator('.sheet-wrap .tgbot-btn').evaluateAll((bs, c) => bs.map((b) => b.dataset.v).find((v) => v !== c), code1);
-  await page.locator(`.sheet-wrap .tgbot-btn[data-v="${wrong}"]`).click();
-  await page.waitForSelector('.screen:not(.leaving) #tg-err:not([hidden])', { timeout: 6000 });
-  ok((await page.locator('.screen:not(.leaving) #tg-err').innerText().then(norm)).includes('выбрано другое число'), 'неверное число — «Начните вход заново»');
+  ok((await screenKey(page)) === '#/telegram', 'экран «Введите код из Telegram»');
+  ok((await page.locator('.screen:not(.leaving) .login-title').innerText().then(norm)).includes('Введите код из Telegram'), 'заголовок «Введите код из Telegram»');
+  ok(await page.locator('.screen:not(.leaving) [data-tg-code]').count() === 0, 'числа для выбора больше нет');
+  const field = page.locator('.screen:not(.leaving) [data-tg-input]');
+  ok(await page.locator('.screen:not(.leaving) .tg-cells i').count() === 6 && (await field.getAttribute('autocomplete')) === 'one-time-code' && (await field.getAttribute('inputmode')) === 'numeric', 'поле кода: 6 цифр, цифровая клавиатура, one-time-code');
+  ok((await page.locator('.sheet-wrap .tgbot').innerText().then(norm)).includes('Нажмите «Поделиться номером»'), 'демо-бот, первый вход: просит «Поделиться номером»');
+  if (isPhone) await shot(page, '02a-demo-bot-nomer');
+  await page.locator('.sheet-wrap [data-act="tg-demo-share"]').click();
+  await page.waitForSelector('.sheet-wrap .tgbot-code', { timeout: 6000 });
+  await settle(page, 400);
+  const botMsg = await page.locator('.sheet-wrap [data-tgbot-code]').innerText().then(norm);
+  const code1 = (await page.locator('.sheet-wrap .tgbot-code').innerText()).trim();
+  ok(/^\d{6}$/.test(code1), 'демо-бот прислал код из 6 цифр');
+  ok(botMsg.replace(/\s+/g, ' ') === `Код для входа в ФинПульс: ${code1} Действует 5 минут. Вводите только на finpulse.smartsol.pro. Никому не называйте этот код. Если вход начали не вы — просто проигнорируйте сообщение.`, 'текст сообщения бота — как у настоящего');
+  if (isPhone) await shot(page, '02b-demo-bot-kod');
+  await tap(page, '[data-act="sheet-close"].btn');
+  await settle(page, 450);
+  await page.waitForFunction(() => !!document.querySelector('.screen:not(.leaving) [data-tg-status][data-state="sent"]'), null, { timeout: 6000 });
+  ok(await page.locator('.screen:not(.leaving) [data-tg-left]').innerText().then((t) => /^[45]:\d\d$/.test(t.trim())), 'таймер срока кода (5 минут)');
+  if (isPhone) await shot(page, '02c-vvedite-kod');
+  // неверный код → «Осталось попыток: 4», поле очищено
+  const wrong = code1 === '000000' ? '111111' : '000000';
+  await field.fill(wrong);
+  await page.waitForSelector('.screen:not(.leaving) #tg-code-err:not([hidden])', { timeout: 6000 });
+  ok((await page.locator('.screen:not(.leaving) #tg-code-err').innerText().then(norm)).includes('Неверный код. Осталось попыток: 4'), 'неверный код — «Осталось попыток: 4»');
+  ok((await field.inputValue()) === '', 'поле кода очищено');
   await settle(page, 300);
-  if (isPhone) await shot(page, '02b-drugoe-chislo');
-  // заново → верное число → вход
-  await tap(page, '[data-restart]');
-  await settle(page, 1300);
-  const code2 = (await page.locator('.screen:not(.leaving) [data-tg-code]').innerText()).trim();
-  ok(await page.locator('.screen:not(.leaving) [data-tg-left]').innerText().then((t) => /^[45]:\d\d$/.test(t.trim())), 'таймер жизни числа (5 минут)');
-  if (isPhone) await shot(page, '02c-vyberite-chislo');
-  await page.locator(`.sheet-wrap .tgbot-btn[data-v="${code2}"]`).click();
+  if (isPhone) await shot(page, '02d-nevernyy-kod');
+  // «Открыть Telegram ещё раз» → код не повторяется; нажатие на код копирует его → «Вставить код» → вход
+  await tap(page, '[data-act="tg-demo-bot"]');
+  await settle(page, 500);
+  ok((await page.locator('.sheet-wrap .tgbot').innerText().then(norm)).includes('Код уже отправлен — он выше в этом чате'), 'бот открыт ещё раз: «Код уже отправлен — он выше в этом чате»');
+  await page.locator('.sheet-wrap .tgbot-code').click();
+  await page.waitForFunction(() => !document.querySelector('.sheet-wrap'), null, { timeout: 6000 });
+  await tap(page, '[data-tg-paste]');
   await page.waitForFunction(() => location.hash === '#/orgs', null, { timeout: 8000 });
   await settle(page, 900);
 
   // --- выбор организации ---
-  ok((await screenKey(page)) === '#/orgs', 'верное число в боте → выбор организации');
+  ok((await screenKey(page)) === '#/orgs', 'код из бота вставлен кнопкой «Вставить код» → выбор организации');
   ok(await page.locator('.org-card').count() === 3, 'три организации с мини-сводкой');
   await noHScroll(page, 'Организации');
   if (isPhone) await shot(page, '03-vybor-organizacii');
@@ -373,6 +389,24 @@ async function runFlow(browser, name, opts, isPhone) {
   await settle(page);
   ok((await page.locator('.org-pill-name').innerText().then(norm)) === 'Север Трейд', 'переключение организации из профиля');
   ok(await page.locator('.screen:not(.leaving) .calm-card').isVisible(), 'у «Север Трейд» нет разрывов — спокойная плашка');
+  // заявка с двумя статьями: превышение — по доле основной статьи, а не по всей сумме заявки
+  ok((await homeCount(page)) === 'На согласовании: 3' && (await page.locator('.screen:not(.leaving) .appr-body').innerText().then(norm)).includes('1 сверх лимита'), '«Север Трейд»: 3 заявки, одна сверх лимита');
+  await page.evaluate(() => { location.hash = '#/requests/r203'; });
+  await settle(page);
+  const two = await page.locator('.screen:not(.leaving) [data-budget]').innerText().then(norm);
+  ok(two.includes('Превышение лимита на 150 000 ₸') && !two.includes('600 000'), 'заявка с двумя статьями: превышение 150 000 ₸ (по доле статьи), а не 600 000 ₸ (по всей сумме)');
+  ok(two.includes('По статье') && two.includes('1 100 000 ₸') && two.includes('из 1 550 000 ₸ приходится 1 100 000 ₸'), 'в бюджете — доля заявки по статье «Доставка»: 1 100 000 из 1 550 000');
+  await noHScroll(page, 'Заявка с двумя статьями');
+  await page.waitForFunction(() => !document.querySelector('.toast.show'), null, { timeout: 5000 });
+  await scrollTo(page, '.budget');
+  if (isPhone) await shot(page, '31-zayavka-dve-stati');
+  await tap(page, '[data-act="approve"]');
+  await settle(page, 450);
+  ok((await page.locator('.sheet .over-note').innerText().then(norm)).includes('Сверх лимита на 150 000 ₸'), 'подтверждение согласования: то же превышение 150 000 ₸');
+  await tap(page, '[data-act="sheet-close"].btn');
+  await settle(page, 400);
+  await tab(page, '#/home');
+  await settle(page);
   await page.waitForFunction(() => !document.querySelector('.toast.show'), null, { timeout: 5000 });
   await settle(page, 500);
   if (isPhone) await shot(page, '25-glavnaya-sever-treyd');

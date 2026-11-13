@@ -938,3 +938,60 @@ html.framed .loadbar { top: 50px; left: 24px; right: 24px; }
 /* раздел следующего этапа (501 not_implemented) — спокойно, без «Обновить» */
 .later-state .empty-ic { background: var(--lav); color: var(--ink); }
 .li-note-row small { color: var(--stone); }
+
+/* ---------- вход по коду из Telegram ---------- */
+.tg-field { position: relative; margin: 20px 0 0; transition: opacity 0.25s; }
+.tg-cells { display: grid; grid-template-columns: repeat(var(--n, 6), minmax(0, 1fr)); gap: 8px; }
+.tg-cells i {
+  display: grid; place-items: center; height: 62px; border-radius: 16px; background: rgba(255, 255, 255, 0.06);
+  box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, 0.14); font: 600 30px/1 var(--f-head); font-style: normal; color: var(--milk);
+  font-variant-numeric: tabular-nums; transition: box-shadow 0.15s, color 0.25s, background 0.25s;
+}
+.tg-field.focus .tg-cells i.on { box-shadow: inset 0 0 0 2px var(--milk); background: rgba(255, 255, 255, 0.1); }
+.tg-field.err .tg-cells i { box-shadow: inset 0 0 0 1.5px var(--coral); }
+.tg-field.ok .tg-cells i { color: var(--mint); box-shadow: inset 0 0 0 2px var(--mint-strong); }
+.tg-field.off { opacity: 0.35; }
+/* Настоящее поле лежит поверх ячеек: нажатие, клавиатура, вставка и автоподстановка работают как у обычного поля,
+   цифры рисуются в ячейках. 16px — чтобы iPhone не увеличивал страницу при нажатии. */
+.tg-input {
+  position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; padding: 0; border: 0; border-radius: 16px; outline: none;
+  background: transparent; color: transparent; -webkit-text-fill-color: transparent; caret-color: transparent;
+  font: 400 16px/1 var(--f-text); text-align: center; -webkit-appearance: none; appearance: none;
+}
+.tg-input:focus, .tg-input:focus-visible { outline: none; } /* фокус показывает активная ячейка */
+.tg-input::selection { background: transparent; }
+.tg-input:disabled { pointer-events: none; }
+.tg-under { display: flex; justify-content: flex-end; min-height: 34px; margin-top: 4px; }
+.link-btn.on-dark { height: 34px; padding: 0 2px; color: rgba(244, 241, 234, 0.72); text-decoration: underline; text-underline-offset: 3px; }
+.link-btn.on-dark[hidden] { display: none; }
+.tg-screen #tg-code-err { margin: 0 0 12px; }
+.tg-status.sent { color: var(--milk); }
+.tg-status.sent .spin { display: none; } /* код уже у пользователя — ждать нечего, идёт только срок */
+.tg-note { margin-top: 14px; font-size: 12.5px; line-height: 1.45; color: rgba(244, 241, 234, 0.45); }
+.tg-note[hidden] { display: none; }
+.tg-note + .tg-warn { padding-top: 16px; }
+/* демо-бот: код в сообщении — моноширинный, копируется нажатием, как в Telegram */
+.tgbot-code { display: inline-block; padding: 1px 6px; border-radius: 6px; background: #e9eef4; font: 600 16px/1.35 ui-monospace, 'SF Mono', Menlo, Consolas, monospace; letter-spacing: 0.04em; color: #1c6fb5; }
+.tgbot-code:active, .tgbot-code.copied { background: var(--lav); }
+.tgbot-btns.one { grid-template-columns: 1fr; }
+.tgbot-btns.one .tgbot-btn { font-size: 15.5px; }
+.tgbot-msg.mine .ic { width: 16px; height: 16px; margin-right: 6px; vertical-align: -2px; }
+.tgbot-msg.mine small { color: rgba(20, 20, 20, 0.6); font-weight: 500; }
+
+/* заявка с несколькими статьями: какая часть суммы приходится на статью бюджета */
+.bud-split { display: flex; gap: 8px; margin-top: 12px; font-size: 12.5px; line-height: 1.45; color: var(--stone); }
+.bud-split .ic { width: 16px; height: 16px; flex-shrink: 0; margin-top: 1px; }
+
+/* ---------- тестовый сервер (?api=test): плашка «ТЕСТ» на всех экранах ---------- */
+:root { --sat0: env(safe-area-inset-top, 0px); }
+html.framed #app { --sat0: 54px; }
+html.env-test { --sat: calc(env(safe-area-inset-top, 0px) + 30px); }
+html.framed.env-test #app { --sat: 84px; }
+.env-bar {
+  position: absolute; z-index: 85; left: 0; right: 0; top: 0; height: calc(var(--sat0) + 30px); padding: var(--sat0) 12px 0 14px;
+  display: flex; align-items: center; gap: 8px; background: #ffd400; color: #141414; font: 700 12.5px/1 var(--f-head);
+  letter-spacing: 0.06em; box-shadow: 0 1px 0 rgba(20, 20, 20, 0.25);
+}
+.env-bar b { padding: 3px 7px; border-radius: 6px; background: #141414; color: #ffd400; }
+.env-bar span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; letter-spacing: 0; }
+.env-bar button { height: 24px; padding: 0 9px; border-radius: 8px; background: rgba(20, 20, 20, 0.12); font: 600 12px/1 var(--f-text); color: #141414; }

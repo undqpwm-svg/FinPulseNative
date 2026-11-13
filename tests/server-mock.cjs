@@ -1,7 +1,9 @@
 // Проверка режима «сервер» по контракту «ФинПульс: API приложения руководителя» v1 (11.11.2026) без настоящего сервера:
 // ответы API подменяются в браузере (page.route) по формам и кодам ошибок контракта.
-// Сценарии: версия API и заголовки; вход через Telegram-бота (start → число и bot_url → poll: 202, 200, access_revoked,
-// challenge_rejected wrong_number/blocked, challenge_expired, too_many_requests, source_unavailable, обрыв связи);
+// Сценарии: версия API и заголовки; вход по одноразовому коду из Telegram (start → code_length и bot_url → poll: 202
+// pending / code_sent, отказы → confirm: 200, code_invalid, code_not_sent, challenge_rejected wrong_code/blocked,
+// challenge_expired, too_many_requests, source_unavailable, обрыв связи); переходный период — старый ответ start
+// с match_code; тестовый сервер (?api=test); залпы одинаковых запросов; заявка с двумя статьями;
 // выбор организации (несколько, partial, 503 source_unavailable, одна); обновление токенов
 // (одно на все запросы, refresh_invalid, access_revoked); «1С недоступна»; решения (успех, already_decided,
 // not_awaiting_you, action_failed, обрыв связи и повтор с тем же Idempotency-Key); настройки; уведомления; push.
@@ -15,8 +17,12 @@ const path = require('path');
 const vm = require('vm');
 
 const DOCS = path.join(__dirname, '..', 'docs');
-// адрес API — из конфига сборки (эта сборка ходит на тестовый сервер)
-const API = /apiBase:\s*'([^']+)'/.exec(fs.readFileSync(path.join(__dirname, '..', 'docs', 'js', 'config.js'), 'utf8'))[1];
+// адрес API и версия приложения — из конфига сборки
+const CONFIG_JS = fs.readFileSync(path.join(__dirname, '..', 'docs', 'js', 'config.js'), 'utf8');
+const API = /apiBase:\s*'([^']+)'/.exec(CONFIG_JS)[1];
+const API_TEST = /apiBaseTest:\s*'([^']+)'/.exec(CONFIG_JS)[1];
+const APP_VERSION = /appVersion:\s*'([^']+)'/.exec(CONFIG_JS)[1];
+const API_HOSTS = [API, API_TEST].map((u) => new URL(u).host);
 const BOT = 'https://t.me/finpulse_smartsol_bot';
 const SHOTS = path.join(__dirname, '..', 'screenshots', 'server');
 const SAVE = process.argv.includes('--shots');
@@ -92,7 +98,19 @@ function card(over = {}) {
   };
 }
 
-const listItem = (c) => ({ id: c.id, number: c.number, status: c.status, my_action: c.my_action, counterparty: c.counterparty, amount: c.amount, currency: c.currency, amount_kzt: c.amount_kzt, article: c.article, purpose: c.purpose, pay_by: c.pay_by, created_at: c.created_at, initiator: { name: 'Тест Инициатор', initials: 'ТИ' }, over_limit: 0, my_decision_at: c.my_decision_at });
+// Заявка с двумя статьями (контракт, 6.2): лимит считается по доле статьи (this_request), а не по всей сумме заявки.
+// Аренда: лимит 2 000 000, израсходовано 1 000 000 + 300 000, доступно 700 000, доля заявки 900 000 → over_by 200 000.
+// Если считать от всей суммы заявки (1 500 000), вышло бы 800 000 — так считало приложение до исправления.
+const MULTI = card({
+  id: 'req_2', number: '902', counterparty: 'ТОО «Тест Арендодатель»', purpose: 'Аренда и коммунальные услуги за декабрь',
+  lines: [{ article: 'Аренда', cost_center: null, amount: 900000, comment: null }, { article: 'Коммунальные услуги', cost_center: null, amount: 600000, comment: null }],
+  budgets: [
+    { article: 'Аренда', cost_center: null, month: '2026-11', has_limit: true, limit: 2000000, spent: 1000000, approved_requests: 300000, available: 700000, this_request: 900000, over_by: 200000 },
+    { article: 'Коммунальные услуги', cost_center: null, month: '2026-11', has_limit: false, limit: null, spent: null, approved_requests: null, available: null, this_request: 600000, over_by: 0 },
+  ],
+});
+
+const listItem = (c) => ({ id: c.id, number: c.number, status: c.status, my_action: c.my_action, counterparty: c.counterparty, amount: c.amount, currency: c.currency, amount_kzt: c.amount_kzt, article: c.article, purpose: c.purpose, pay_by: c.pay_by, created_at: c.created_at, initiator: { name: 'Тест Инициатор', initials: 'ТИ' }, over_limit: Math.max(0, ...(c.budgets || []).map((x) => x.over_by || 0)), my_decision_at: c.my_decision_at });
 
 function summary() {
   const d = calDays();
@@ -111,10 +129,13 @@ function summary() {
 // ---------- поддельный сервер ----------
 async function mockApi(page, ctl) {
   ctl.calls = [];
-  ctl.state = { cookie: false, access: 'at_1', decided: false, orgs: [ORG], partial: false, queue: [], starts: 0, settings: { requests: true, summary: true, payments: true, gaps: true, whatsapp: false }, ...ctl.state };
-  await page.route(`${API}/**`, async (route) => {
+  // legacy: true — сервер прежней схемы входа (match_code, токены из опроса); code — код, который «прислал бот»;
+  // queue / confirmQueue — исходы очередных опросов и вводов кода; delay — задержка ответов на GET, мс (медленная 1С).
+  ctl.state = { cookie: false, access: 'at_1', decided: false, orgs: [ORG], partial: false, queue: [], confirmQueue: [], starts: 0, legacy: false, code: '483921', sent: false, tries: 5, delay: 0, settings: { requests: true, summary: true, payments: true, gaps: true, whatsapp: false }, ...ctl.state };
+  await page.route(/^https:\/\/api(-test)?\.smartsol\.pro\/api\/v1\//, async (route) => {
     const req = route.request();
     const url = new URL(req.url());
+    if (!API_HOSTS.includes(url.host)) return route.abort('failed');
     const p = url.pathname.replace('/api/v1', '');
     let body = null;
     try {
@@ -122,8 +143,8 @@ async function mockApi(page, ctl) {
     } catch (e) {
       body = null;
     }
-    const call = { method: req.method(), path: p, query: Object.fromEntries(url.searchParams), body, headers: req.headers() };
-    ctl.calls.push(call);
+    const call = { method: req.method(), host: url.host, path: p, query: Object.fromEntries(url.searchParams), body, headers: req.headers() };
+    if (req.method() !== 'OPTIONS') ctl.calls.push(call);
     // CORS по контракту: точный origin, credentials, заголовки, которые приложение может читать
     const cors = {
       'Access-Control-Allow-Origin': req.headers().origin || '*',
@@ -139,26 +160,67 @@ async function mockApi(page, ctl) {
     if (ctl.override && ctl.override(call, { json, err, route, st })) return undefined;
 
     if (p === '/version') return json(200, { api_version: '1.0', min_app_version: '1.0.0', server_time: T(TODAY, '10:00'), webpush_public_key: 'BLc4xRzKlKORKWlbdgFaBrrPK3ydWAHo4M0gs0i1oEKgPpWC5cW8OCzVI3YvMClY4f3hHsqeY3m6Iyjn6CbsXzc' });
+    const user = st.user || USER;
+    const tokens = () => {
+      st.cookie = true; // сервер выставил fp_refresh (HttpOnly) — в мок-сервере держим его состояние сами
+      return json(200, { access_token: st.access, access_expires_in: 900, refresh_expires_in: 2592000, token_type: 'Bearer', user }, { 'Set-Cookie': 'fp_refresh=rt_x; HttpOnly; Secure; SameSite=Strict; Path=/api/v1/auth; Max-Age=2592000' });
+    };
+    const blocked = () => err(409, 'challenge_rejected', 'Слишком много попыток входа. Попробуйте через 15 мин.', { reason: 'blocked', retry_after: 900 });
+    const revoked = () => err(403, 'access_revoked', 'Доступ к приложению выключен. Обратитесь к администратору ФинПульса в вашей компании.', { reason: 'revoked' });
+    const expired = () => err(410, 'challenge_expired', 'Время входа вышло. Начните вход заново.');
+    const sourceDown = () => err(503, 'source_unavailable', 'Нет связи с учётом компании', undefined, { 'Retry-After': '60' });
     if (p === '/auth/telegram/start') {
       if (st.startLimited) return err(429, 'too_many_requests', 'Слишком много входов с этого адреса', { retry_after: 600 }, { 'Retry-After': '600' });
       st.starts++;
       st.challenge = `ch_${st.starts}`;
-      return json(200, { challenge_id: st.challenge, bot_url: `${BOT}?start=n_${st.starts}`, match_code: st.starts === 1 ? '47' : '05', expires_in: 300, poll_interval: 1 });
+      st.sent = false;
+      st.tries = 5;
+      // сервер прежней схемы: число для выбора в боте, поля code_length нет
+      if (st.legacy) return json(200, { challenge_id: st.challenge, bot_url: `${BOT}?start=n_${st.starts}`, match_code: st.starts === 1 ? '47' : '05', expires_in: 300, poll_interval: 1 });
+      return json(200, { challenge_id: st.challenge, bot_url: `${BOT}?start=n_${st.starts}`, code_length: 6, expires_in: 300, poll_interval: 1 });
     }
     if (p === '/auth/telegram/poll') {
       if (!body || body.challenge_id !== st.challenge) return err(404, 'not_found', 'Вход не найден');
-      // исход очередного опроса задаёт тест (st.queue); очередь пуста — «ещё не подтвердили»
-      const o = st.queue.length ? st.queue.shift() : 'pending';
-      if (o === 'pending') return json(202, { status: 'pending' });
+      // исход очередного опроса задаёт тест (st.queue); очередь пуста — состояние не меняется
+      const o = st.queue.length ? st.queue.shift() : 'same';
       if (o === 'abort') return route.abort('failed');
       if (o === 'rate') return err(429, 'too_many_requests', 'Слишком часто', { retry_after: 1 }, { 'Retry-After': '1' });
-      if (o === 'revoked') return err(403, 'access_revoked', 'Этот номер не подключён к ФинПульсу. Обратитесь к администратору компании', { reason: 'not_connected' });
-      if (o === 'wrong') return err(409, 'challenge_rejected', 'В Telegram выбрано другое число. Начните вход заново.', { reason: 'wrong_number' });
-      if (o === 'blocked') return err(409, 'challenge_rejected', 'Три неверных выбора подряд: вход заблокирован на 15 минут', { reason: 'blocked', retry_after: 900 });
-      if (o === 'expired') return err(410, 'challenge_expired', 'Время входа истекло');
-      if (o === 'source') return err(503, 'source_unavailable', 'Нет связи с учётом компании', undefined, { 'Retry-After': '60' });
-      st.cookie = true; // сервер выставил fp_refresh (HttpOnly) — в мок-сервере держим его состояние сами
-      return json(200, { access_token: st.access, access_expires_in: 900, refresh_expires_in: 2592000, token_type: 'Bearer', user: USER }, { 'Set-Cookie': 'fp_refresh=rt_x; HttpOnly; Secure; SameSite=Strict; Path=/api/v1/auth; Max-Age=2592000' });
+      if (o === 'blocked') return blocked();
+      if (o === 'expired') return expired();
+      if (o === 'source') return sourceDown();
+      if (st.legacy) {
+        if (o === 'revoked') return err(403, 'access_revoked', 'Этот номер не подключён к ФинПульсу. Обратитесь к администратору компании', { reason: 'not_connected' });
+        if (o === 'wrong') return err(409, 'challenge_rejected', 'В Telegram выбрано другое число. Начните вход заново.', { reason: 'wrong_number' });
+        if (o === 'ok') return tokens(); // прежняя схема: токены выдаёт опрос
+        return json(202, { status: 'pending' });
+      }
+      if (o === 'revoked') return revoked();
+      if (o === 'sent') st.sent = true;
+      if (o === 'pending') st.sent = false;
+      // новая схема: опрос токенов не выдаёт никогда
+      return st.sent ? json(202, { status: 'code_sent', expires_in: 287 }) : json(202, { status: 'pending' });
+    }
+    if (p === '/auth/telegram/confirm') {
+      if (st.legacy) return err(404, 'not_found', 'Не найдено'); // на сервере прежней схемы такого метода нет
+      if (!body || body.challenge_id !== st.challenge) return err(404, 'not_found', 'Вход не найден');
+      const o = st.confirmQueue.length ? st.confirmQueue.shift() : '';
+      if (o === 'abort') return route.abort('failed');
+      if (o === 'rate') return err(429, 'too_many_requests', 'Слишком много попыток входа. Попробуйте позже.', { retry_after: 30 }, { 'Retry-After': '30' });
+      if (o === 'blocked') return blocked();
+      if (o === 'expired') return expired();
+      if (o === 'source') return sourceDown();
+      if (o === 'revoked') return revoked();
+      const code = String(body.code == null ? '' : body.code).replace(/[\s-]/g, '');
+      if (!/^\d{6}$/.test(code)) return err(422, 'validation_error', 'Проверьте поля запроса.', { fields: { code: 'Код — 6 цифр' } });
+      if (!st.sent) return err(409, 'code_not_sent', 'Код ещё не отправлен. Откройте Telegram — бот пришлёт код.');
+      if (code !== st.code) {
+        st.tries--;
+        if (st.tries > 0) return err(422, 'code_invalid', `Неверный код. Осталось попыток: ${st.tries}.`, { attempts_left: st.tries });
+        st.challenge = null;
+        return err(409, 'challenge_rejected', 'Код введён неверно несколько раз. Начните вход заново.', { reason: 'wrong_code' });
+      }
+      st.challenge = null; // код одноразовый
+      return tokens();
     }
     if (p === '/auth/refresh') {
       if (st.revokeOnRefresh) return err(403, 'access_revoked', 'Администратор выключил вам доступ к приложению');
@@ -176,7 +238,8 @@ async function mockApi(page, ctl) {
     const auth = req.headers().authorization || '';
     if (st.expireAccess && auth === `Bearer ${st.expireAccess}`) return err(401, 'token_expired', 'Токен истёк');
     if (auth !== `Bearer ${st.access}`) return err(401, 'unauthorized', 'Нет авторизации');
-    if (p === '/me') return json(200, { user: USER });
+    if (st.delay && req.method() === 'GET') await new Promise((r) => setTimeout(r, st.delay)); // медленная 1С
+    if (p === '/me') return json(200, { user });
     if (p === '/me/settings' && req.method() === 'GET') return json(200, settingsBody(st));
     if (p === '/me/settings' && req.method() === 'PUT') {
       const n = (body && body.notifications) || {};
@@ -209,8 +272,9 @@ async function mockApi(page, ctl) {
     if (p === '/orgs/org_test/requests') {
       const c = card();
       if (url.searchParams.get('tab') === 'decided') return json(200, { updated_at: T(TODAY, '10:15'), items: st.decided ? [listItem(card({ my_action: 'approved', my_decision_at: T(TODAY, '10:20') }))] : [], next_cursor: null });
-      return json(200, { updated_at: T(TODAY, '10:15'), items: st.decided ? [] : [listItem(c)], next_cursor: null });
+      return json(200, { updated_at: T(TODAY, '10:15'), items: [...(st.decided ? [] : [listItem(c)]), ...(st.multi ? [listItem(MULTI)] : [])], next_cursor: null });
     }
+    if (p === '/orgs/org_test/requests/req_2' && st.multi) return json(200, MULTI);
     if (p === '/orgs/org_test/requests/req_1') return json(200, st.decided ? card({ my_action: 'approved', status: 'approved', my_decision_at: T(TODAY, '10:20') }) : card());
     if (p === '/orgs/org_test/requests/req_1/approve') {
       st.decided = true;
@@ -239,10 +303,12 @@ function settingsBody(st) {
   return { notifications: { requests: { enabled: s.requests, editable: true }, summary: { enabled: s.summary, editable: true, time: '08:30' }, payments: { enabled: s.payments, editable: true, min_amount: 500000 }, gaps: { enabled: s.gaps, editable: true, days_ahead: 3 }, whatsapp: { enabled: s.whatsapp, editable: false } } };
 }
 
-// Вход: «Войти через Telegram» → первый опрос 202, второй — 200 (или исход из outcomes).
-async function login(page, ctl, { expect = '#/home', outcomes = ['pending', 'ok'] } = {}) {
-  ctl.state.queue = [...outcomes];
+// Вход: «Войти через Telegram» → опрос: 202 pending, затем 202 code_sent («бот прислал код») → ввод кода → 200.
+async function login(page, ctl, { expect = '#/home' } = {}) {
+  ctl.state.queue = ['pending', 'sent'];
   await page.locator('.screen:not(.leaving) [data-act="tg-start"]').click();
+  await page.waitForFunction(() => !!document.querySelector('.screen:not(.leaving) [data-tg-status][data-state="sent"]'), null, { timeout: 12000 });
+  await page.locator('.screen:not(.leaving) [data-tg-input]').fill(ctl.state.code); // последняя цифра — код уходит сам
   await page.waitForFunction((h) => location.hash === h, expect, { timeout: 12000 });
   await settle(page, 700);
 }
@@ -287,7 +353,7 @@ const PUSH_STUB = () => {
 
   try {
     // ---------- 1. вход ----------
-    console.log('\n▶ Вход через Telegram-бота (контракт, 2)');
+    console.log('\n▶ Вход по одноразовому коду из Telegram (контракт, 2)');
     {
       const { ctx, page, errors, ctl } = await newCtx(devices['iPhone 13'], { orgs: [ORG, ORG2], partial: true });
       const st = ctl.state;
@@ -295,13 +361,20 @@ const PUSH_STUB = () => {
       await settle(page, 900);
       ok((await page.evaluate(() => location.hash)) === '#/login', 'по умолчанию — настоящий вход');
       ok(API === 'https://api.smartsol.pro/api/v1', 'сборка ходит на рабочий сервер api.smartsol.pro');
+      ok(ctl.calls.every((c) => c.host === 'api.smartsol.pro') && (await page.locator('.env-bar').count()) === 0, 'без параметра адреса — только рабочий сервер, плашки «ТЕСТ» нет');
       const ver = ctl.calls.find((c) => c.path === '/version');
-      ok(ver && ver.headers['x-app-version'] === '1.0.0' && ver.headers['x-app-platform'] === 'web', 'при запуске GET /version с X-App-Version и X-App-Platform');
-      ok(norm(await page.locator('[data-act="tg-start"]').innerText()).includes('Войти через Telegram') && (await page.locator('#phone, #code').count()) === 0, 'кнопка «Войти через Telegram», полей номера и кода нет');
+      ok(ver && ver.headers['x-app-version'] === APP_VERSION && ver.headers['x-app-platform'] === 'web', `при запуске GET /version с X-App-Version ${APP_VERSION} и X-App-Platform`);
+      ok(norm(await page.locator('[data-act="tg-start"]').innerText()).includes('Войти через Telegram') && (await page.locator('#phone, #code, [data-tg-input]').count()) === 0, 'экран входа: кнопка «Войти через Telegram», полей номера и кода нет');
+      ok(!/кодов нет/i.test(norm(await page.locator('.login-hint').innerText())), 'подсказка под кнопкой больше не обещает «кодов нет»');
       await shot(page, '01-vhod');
       const tgErr = () => page.locator('.screen:not(.leaving) #tg-err').innerText().then(norm);
+      const codeErr = () => page.locator('.screen:not(.leaving) #tg-code-err').innerText().then(norm);
       const waitErr = () => page.waitForSelector('.screen:not(.leaving) #tg-err:not([hidden])', { timeout: 8000 });
-      // «Начать заново»: дождаться нового экрана ожидания, чтобы не принять старую ошибку за новую
+      const waitCodeErr = (kind) => page.waitForSelector(`.screen:not(.leaving) #tg-code-err[data-kind="${kind}"]:not([hidden])`, { timeout: 8000 });
+      const input = () => page.locator('.screen:not(.leaving) [data-tg-input]');
+      const confirms = () => ctl.calls.filter((c) => c.path === '/auth/telegram/confirm');
+      const polls = () => ctl.calls.filter((c) => c.path === '/auth/telegram/poll');
+      // «Начать заново»: дождаться нового экрана ввода кода, чтобы не принять старую ошибку за новую
       const restart = async () => {
         await page.locator('[data-restart]').click();
         await page.waitForSelector('.screen:not(.leaving) [data-tg-status]:not([hidden])', { timeout: 8000 });
@@ -314,43 +387,102 @@ const PUSH_STUB = () => {
       ok(norm(await page.locator('#login-err').innerText()).includes('Слишком много попыток входа с этого адреса. Повторите через 10 минут'), 'start: 429 too_many_requests — понятный текст с временем');
       st.startLimited = false;
 
-      // start → число, bot_url, опрос
+      // start → поле кода, bot_url, опрос
       await page.locator('[data-act="tg-start"]').click();
       await page.waitForFunction(() => location.hash === '#/telegram');
       await settle(page, 900);
       const start = ctl.calls.find((c) => c.path === '/auth/telegram/start');
       ok(start && start.method === 'POST' && start.body && Object.keys(start.body).length === 0 && !start.headers.authorization, 'POST /auth/telegram/start — тело {}, без Authorization');
-      ok((await page.locator('[data-tg-code]').innerText()).trim() === '47', 'match_code крупно: «47»');
-      ok(norm(await page.locator('.login-title').innerText()).includes('Выберите в Telegram число'), '«Выберите в Telegram число»');
+      ok(norm(await page.locator('.login-title').innerText()).includes('Введите код из Telegram'), '«Введите код из Telegram»');
+      ok(norm(await page.locator('.tg-sub').innerText()).includes('Код пришлёт бот в Telegram'), 'подсказка «Код пришлёт бот в Telegram»');
+      ok((await page.locator('[data-tg-code]').count()) === 0, 'числа для выбора на экране нет');
+      ok((await page.locator('.tg-cells i').count()) === 6, 'поле кода — по code_length (6 цифр)');
+      ok((await input().getAttribute('inputmode')) === 'numeric' && (await input().getAttribute('autocomplete')) === 'one-time-code', 'поле: inputmode="numeric", autocomplete="one-time-code"');
+      ok(await page.locator('[data-tg-submit]').isDisabled(), '«Войти» неактивна, пока код не введён целиком');
       ok(ctl.popups.some((p) => p.url().startsWith(`${BOT}?start=n_1`)), 'bot_url открыт сразу (новое окно Telegram)');
       ok((await page.locator('[data-tg-open]').getAttribute('href')) === `${BOT}?start=n_1` && norm(await page.locator('[data-tg-open]').innerText()).includes('Открыть Telegram ещё раз'), '«Открыть Telegram ещё раз» — по той же ссылке');
-      ok(norm(await page.locator('[data-tg-status]').innerText()).includes('Ждём подтверждения'), 'статус «Ждём подтверждения в Telegram»');
-      await shot(page, '02-vyberite-chislo');
+      ok(norm(await page.locator('[data-tg-status]').innerText()).includes('Ждём код от бота'), 'статус «Ждём код от бота»');
+      ok(/^[45]:\d\d$/.test((await page.locator('[data-tg-left]').innerText()).trim()), 'таймер по expires_in из start (5 минут)');
+      await shot(page, '02-vvedite-kod');
       await settle(page, 1300);
-      const polls = ctl.calls.filter((c) => c.path === '/auth/telegram/poll');
-      ok(polls.length >= 1 && polls.every((c) => c.body.challenge_id === 'ch_1' && !c.headers.authorization), 'POST /auth/telegram/poll с challenge_id, без Authorization');
-      ok((await page.evaluate(() => window.__cred)).filter((c) => c.url.includes('/auth/telegram/poll')).every((c) => c.credentials === 'include'), 'опрос — с credentials: include (ответ ставит cookie)');
-      ok((await page.locator('#tg-err').isHidden()) && (await page.evaluate(() => location.hash)) === '#/telegram', '202 pending — ждём дальше');
+      ok(polls().length >= 1 && polls().every((c) => c.body.challenge_id === 'ch_1' && !c.headers.authorization), 'POST /auth/telegram/poll с challenge_id, без Authorization');
+      ok((await page.locator('#tg-err').isHidden()) && (await page.evaluate(() => location.hash)) === '#/telegram' && confirms().length === 0, '202 pending — ждём дальше, токенов опрос не выдаёт');
 
-      // 409 wrong_number
-      st.queue = ['wrong'];
+      // неполный код не отправляется
+      await input().fill('12345');
+      await settle(page, 500);
+      ok(confirms().length === 0 && (await page.locator('[data-tg-submit]').isDisabled()), 'неполный код не отправляется');
+      // код введён раньше, чем бот его прислал → 409 code_not_sent, поле остаётся
+      await input().fill('123456');
+      await waitCodeErr('not_sent');
+      ok((await codeErr()).includes('Бот ещё не прислал код. Откройте Telegram — бот пришлёт код'), '409 code_not_sent — «Откройте Telegram — бот пришлёт код»');
+      ok((await input().inputValue()) === '123456' && (await page.evaluate(() => location.hash)) === '#/telegram', 'поле кода остаётся, вход не отменён');
+      const c1 = confirms()[0];
+      ok(c1 && c1.method === 'POST' && c1.body.challenge_id === 'ch_1' && c1.body.code === '123456' && !c1.headers.authorization, 'POST /auth/telegram/confirm {challenge_id, code}, без Authorization; код отправлен сам при шестой цифре');
+      ok((await page.evaluate(() => window.__cred)).filter((c) => c.url.includes('/auth/telegram/confirm')).every((c) => c.credentials === 'include'), 'ввод кода — с credentials: include (ответ ставит cookie)');
+
+      // бот прислал код: 202 code_sent → таймер по expires_in опроса
+      st.queue = ['sent'];
+      await page.waitForFunction(() => !!document.querySelector('.screen:not(.leaving) [data-tg-status][data-state="sent"]'), null, { timeout: 8000 });
+      ok(/^4:4\d$/.test((await page.locator('[data-tg-left]').innerText()).trim()), '202 code_sent — таймер по expires_in опроса (287 с)');
+      ok(norm(await page.locator('[data-tg-status]').innerText()).includes('Срок действия кода'), '202 code_sent — статус «Срок действия кода», ожидание кода снято');
+      ok(await page.locator('#tg-code-err').isHidden(), 'подсказка «бот ещё не прислал» убрана');
+      await shot(page, '03-kod-otpravlen');
+
+      // неверный код → 422 code_invalid с числом попыток, поле очищено
+      await input().fill('111111');
+      await waitCodeErr('code_invalid');
+      ok((await codeErr()).includes('Неверный код. Осталось попыток: 4'), '422 code_invalid — «Неверный код. Осталось попыток: 4»');
+      ok((await input().inputValue()) === '' && (await page.evaluate(() => location.hash)) === '#/telegram', 'поле очищено, можно вводить снова');
+      await shot(page, '04-nevernyy-kod');
+      // вставка из буфера: берутся только цифры, всё сообщение бота целиком тоже подходит
+      await page.evaluate(() => {
+        const dt = new DataTransfer();
+        dt.setData('text', 'Код для входа в ФинПульс: 222 222\nДействует 5 минут.');
+        document.querySelector('[data-tg-input]').dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+      });
+      await page.waitForFunction(() => /попыток: 3/.test(document.querySelector('#tg-code-err')?.textContent || ''), null, { timeout: 8000 });
+      ok(confirms().slice(-1)[0].body.code === '222222', 'вставка из буфера: из текста взяты цифры кода, отправлено сразу');
+      // 429 на вводе кода — пауза с таймером
+      st.confirmQueue = ['rate'];
+      await input().fill('333333');
+      await waitCodeErr('rate');
+      ok(/Слишком много попыток\. Повторите через 0:[0-3]\d/.test(await codeErr()) && (await page.locator('[data-tg-submit]').isDisabled()), '429 на вводе кода — «Повторите через 0:30», «Войти» неактивна');
+      await page.reload(); // часы в тесте стоят — паузу снимаем перезагрузкой; вход начинаем заново
+      await settle(page, 900);
+      st.queue = ['sent'];
+      await page.locator('[data-act="tg-start"]').click();
+      await page.waitForFunction(() => !!document.querySelector('.screen:not(.leaving) [data-tg-status][data-state="sent"]'), null, { timeout: 8000 });
+      // обрыв связи на вводе кода — код остаётся в поле, «Войти» отправляет его ещё раз
+      st.confirmQueue = ['abort'];
+      await input().fill('444444');
+      await waitCodeErr('network');
+      ok((await codeErr()).includes('Нет связи с сервером') && (await input().inputValue()) === '444444', 'обрыв связи на вводе кода — код остаётся в поле');
+      const before = confirms().length;
+      await page.locator('[data-tg-submit]').click();
+      await waitCodeErr('code_invalid');
+      ok(confirms().length === before + 1 && confirms().slice(-1)[0].body.code === '444444', '«Войти» отправляет код ещё раз');
+      // пятый неверный код → 409 challenge_rejected wrong_code: вход отклонён
+      for (const [i, c] of ['555555', '666666', '777777'].entries()) {
+        await input().fill(c);
+        await page.waitForFunction((n) => new RegExp(`попыток: ${n}`).test(document.querySelector('#tg-code-err')?.textContent || ''), 3 - i, { timeout: 8000 });
+      }
+      await input().fill('888888');
       await waitErr();
-      ok((await tgErr()).includes('В Telegram выбрано другое число. Начните вход заново.'), '409 challenge_rejected wrong_number — текст message');
-      ok(norm(await page.locator('[data-restart]').innerText()) === 'Начать заново' && (await page.locator('[data-restart]').isEnabled()), 'кнопка «Начать заново»');
-      const pollsAfter = ctl.calls.filter((c) => c.path === '/auth/telegram/poll').length;
+      ok((await tgErr()).includes('Код введён неверно несколько раз. Начните вход заново.'), 'пятый неверный код — 409 challenge_rejected wrong_code: «Начните вход заново»');
+      ok(norm(await page.locator('[data-restart]').innerText()) === 'Начать заново' && (await page.locator('[data-restart]').isEnabled()) && (await input().isDisabled()), 'вход отклонён: поле кода выключено, кнопка «Начать заново»');
+      const pollsAfter = polls().length;
       await settle(page, 1500);
-      ok(ctl.calls.filter((c) => c.path === '/auth/telegram/poll').length === pollsAfter, 'после отказа опрос остановлен');
-      await shot(page, '03-drugoe-chislo');
+      ok(polls().length === pollsAfter, 'после отказа опрос остановлен');
+      await shot(page, '05-vhod-otklonen');
 
       // заново → 409 blocked с таймером
       await restart();
-      await settle(page, 900);
-      ok(st.starts === 2 && (await page.locator('[data-tg-code]').innerText()).trim() === '05', 'новый вход — новое число (может начинаться с 0: «05»)');
       st.queue = ['blocked'];
       await waitErr();
-      ok((await tgErr()).includes('вход заблокирован на 15 минут'), '409 blocked — текст message');
+      ok((await tgErr()).includes('Слишком много попыток входа. Попробуйте через 15 мин.'), '409 blocked — текст message');
       ok(/Начать заново через 1[45]:\d\d/.test(norm(await page.locator('[data-restart]').innerText())) && (await page.locator('[data-restart]').isDisabled()), 'blocked — таймер по retry_after, кнопка неактивна');
-      await shot(page, '04-blokirovka');
+      await shot(page, '06-blokirovka');
       await page.locator('[data-back]').click();
       await settle(page, 700);
       ok(/Вход снова через 1[45]:\d\d/.test(norm(await page.locator('[data-act="tg-start"]').innerText())) && (await page.locator('[data-act="tg-start"]').isDisabled()), 'блокировка видна и на экране входа');
@@ -362,14 +494,19 @@ const PUSH_STUB = () => {
       st.queue = ['revoked'];
       await page.locator('[data-act="tg-start"]').click();
       await waitErr();
-      ok((await tgErr()).includes('Этот номер не подключён к ФинПульсу. Обратитесь к администратору компании'), '403 access_revoked — текст message и «Начать заново»');
-      await shot(page, '05-nomer-ne-podklyuchen');
+      ok((await tgErr()).includes('Доступ к приложению выключен. Обратитесь к администратору ФинПульса в вашей компании'), '403 access_revoked — текст message и «Начать заново»');
+      await shot(page, '07-dostup-vyklyuchen');
 
-      // 410 challenge_expired
+      // 410 challenge_expired: до кода — «время входа», после — «срок кода»
       st.queue = ['expired'];
       await restart();
       await waitErr();
-      ok((await tgErr()).includes('Время входа истекло'), '410 challenge_expired — «Время входа истекло, начните заново»');
+      ok((await tgErr()).includes('Время входа вышло. Начните заново'), '410 challenge_expired до кода — «Время входа вышло»');
+      st.queue = ['sent', 'expired'];
+      await restart();
+      await waitErr();
+      ok((await tgErr()).includes('Срок действия кода вышел. Начните вход заново — бот пришлёт новый код'), '410 challenge_expired после кода — «Срок действия кода вышел»');
+      await shot(page, '08-srok-vyshel');
 
       // 503 source_unavailable — вход отменён, заново через минуту
       st.queue = ['source'];
@@ -377,26 +514,33 @@ const PUSH_STUB = () => {
       await waitErr();
       ok((await tgErr()).includes('Нет связи с учётом компании'), '503 source_unavailable — «Нет связи с учётом компании»');
       ok(/через [01]:\d\d/.test(norm(await page.locator('[data-restart]').innerText())), '«Начать заново» — через минуту (Retry-After)');
-      await shot(page, '06-net-svyazi-s-uchetom');
+      await shot(page, '09-net-svyazi-s-uchetom');
 
-      // обрыв связи и 429 на опросе — опрос продолжается; затем 200
+      // обрыв связи и 429 на опросе — опрос продолжается; затем код из буфера кнопкой «Вставить код» → вход
       await page.locator('[data-back]').click();
       await settle(page, 700);
-      st.queue = ['abort', 'rate', 'pending', 'ok'];
+      st.queue = ['abort', 'rate', 'pending', 'sent'];
       await page.locator('[data-act="tg-start"]').click();
       await page.waitForFunction(() => /Нет связи/.test(document.querySelector('[data-tg-text]')?.textContent || ''), null, { timeout: 8000 });
       ok(true, 'обрыв связи при опросе — «Нет связи — пробуем снова»');
+      await page.waitForFunction(() => !!document.querySelector('.screen:not(.leaving) [data-tg-status][data-state="sent"]'), null, { timeout: 15000 });
+      ok(true, 'после 429 опрос продолжился');
+      await page.evaluate((code) => {
+        Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { readText: async () => `${code.slice(0, 3)}-${code.slice(3)}` } });
+      }, st.code);
+      await page.locator('[data-tg-paste]').click();
       await page.waitForFunction(() => location.hash === '#/orgs', null, { timeout: 15000 });
       await settle(page, 900);
-      ok(true, 'после 429 опрос продолжился, 200 → вход');
-      ok(st.cookie, '200 — refresh-cookie выставлена сервером');
+      ok(confirms().slice(-1)[0].body.code === st.code, '«Вставить код» — код из буфера («483-921» → цифры), отправлен сразу');
+      ok(st.cookie, '200 на confirm — refresh-cookie выставлена сервером');
 
       // /orgs: partial
       ok(await page.locator('.org-card').count() === 2, 'организаций две → экран выбора');
       ok(norm(await page.locator('.partial-note').innerText()).includes('Часть организаций недоступна'), 'partial: true → плашка «Часть организаций недоступна»');
-      await shot(page, '07-chast-organizaciy-nedostupna');
-      const storageDump = await page.evaluate(() => JSON.stringify({ ...localStorage }));
+      await shot(page, '10-chast-organizaciy-nedostupna');
+      const storageDump = await page.evaluate(() => JSON.stringify({ ...localStorage, ...sessionStorage }));
       ok(storageDump.includes('loggedIn') && !/rt_|at_\d|refresh/i.test(storageDump.replace(/refresh_expires/g, '')), 'в хранилище браузера нет ни refresh-, ни access-токена');
+      ok(!storageDump.includes(st.code) && !/ch_\d/.test(storageDump), 'в хранилище браузера нет ни кода, ни challenge_id');
       const cred = await page.evaluate(() => window.__cred);
       ok(cred.filter((c) => c.url.includes('/orgs')).every((c) => c.credentials === 'omit'), 'запросы данных — без cookie (credentials: omit)');
       await page.locator('[data-act="pick-org"][data-id="org_test"]').click();
@@ -408,6 +552,233 @@ const PUSH_STUB = () => {
       ok((await page.locator('.icon-badge').innerText()) === '2', 'колокольчик — unread_count из сводки');
       ok(await page.locator('.wk-col.neg').count() > 0, 'красные дни недели — по threshold из сводки');
       ok(ctl.calls.some((c) => c.path === '/orgs/org_test/summary' && c.headers.authorization === 'Bearer at_1'), 'запросы данных с Bearer access-токеном');
+      noErrors(errors);
+      await ctx.close();
+    }
+
+    console.log('\n▶ Пустое имя пользователя (first_name: "")');
+    {
+      const { ctx, page, errors, ctl } = await newCtx(devices['iPhone 13'], { user: { ...USER, name: 'Руководитель Т.Т.', first_name: '' } });
+      await page.goto(BASE);
+      await settle(page, 800);
+      await login(page, ctl);
+      const greet = norm(await page.locator('.greet h1').innerText());
+      ok(/^Добр\S+ \S+$/.test(greet) && !greet.includes(',') && !greet.includes('Руководитель'), `first_name пустой — приветствие без имени («${greet}»)`);
+      noErrors(errors);
+      await ctx.close();
+    }
+
+    // ---------- 1а. переходный период: сервер прежней схемы ----------
+    console.log('\n▶ Переходный период: сервер отвечает по-старому (match_code) — прежний экран с числом');
+    {
+      const { ctx, page, errors, ctl } = await newCtx(devices['iPhone 13'], { legacy: true });
+      const st = ctl.state;
+      await page.goto(BASE);
+      await settle(page, 900);
+      await page.locator('[data-act="tg-start"]').click();
+      await page.waitForFunction(() => location.hash === '#/telegram');
+      await settle(page, 900);
+      ok((await page.locator('[data-tg-code]').innerText()).trim() === '47', 'match_code крупно: «47»');
+      ok(norm(await page.locator('.login-title').innerText()).includes('Выберите в Telegram число') && (await page.locator('[data-tg-input]').count()) === 0, '«Выберите в Telegram число», поля кода нет');
+      ok(ctl.popups.some((p) => p.url().startsWith(`${BOT}?start=n_1`)) && (await page.locator('[data-tg-open]').getAttribute('href')) === `${BOT}?start=n_1`, 'bot_url открыт сразу, «Открыть Telegram ещё раз» — по той же ссылке');
+      ok(norm(await page.locator('[data-tg-status]').innerText()).includes('Ждём подтверждения'), 'статус «Ждём подтверждения в Telegram»');
+      await shot(page, '11-staraya-shema-chislo');
+      await settle(page, 1300);
+      ok((await page.locator('#tg-err').isHidden()) && (await page.evaluate(() => location.hash)) === '#/telegram', '202 — ждём дальше');
+      st.queue = ['wrong'];
+      await page.waitForSelector('.screen:not(.leaving) #tg-err:not([hidden])', { timeout: 8000 });
+      ok(norm(await page.locator('.screen:not(.leaving) #tg-err').innerText()).includes('В Telegram выбрано другое число. Начните вход заново.'), '409 challenge_rejected wrong_number — текст message, «Начать заново»');
+      st.queue = ['pending', 'ok'];
+      await page.locator('[data-restart]').click();
+      await page.waitForFunction(() => location.hash === '#/home', null, { timeout: 12000 });
+      await settle(page, 700);
+      ok(st.starts === 2 && st.cookie, 'новый вход: опрос ответил 200 с токенами → вход выполнен');
+      ok(!ctl.calls.some((c) => c.path === '/auth/telegram/confirm'), 'по старой схеме confirm не вызывается');
+      ok(norm(await page.locator('.hero').innerText()).includes('5 000 000'), 'главная открылась');
+      noErrors(errors);
+      await ctx.close();
+    }
+
+    // ---------- 1б. тестовый сервер ----------
+    console.log('\n▶ Тестовый сервер: ?api=test — только эта вкладка, плашка «ТЕСТ»');
+    {
+      const { ctx, page, errors, ctl } = await newCtx(devices['iPhone 13']);
+      await ctx.addInitScript(PUSH_STUB);
+      await page.goto(`${BASE}?api=test`);
+      await settle(page, 900);
+      const bar = page.locator('.env-bar');
+      ok((await bar.isVisible()) && norm(await bar.innerText()).includes('ТЕСТ') && norm(await bar.innerText()).includes('api-test.smartsol.pro'), 'плашка «ТЕСТ» с адресом тестового сервера');
+      ok(ctl.calls.length > 0 && ctl.calls.every((c) => c.host === 'api-test.smartsol.pro'), 'запросы идут на api-test.smartsol.pro');
+      await login(page, ctl);
+      await settle(page, 1500);
+      ok((await page.evaluate(() => location.hash)) === '#/home' && (await bar.isVisible()), 'после входа плашка «ТЕСТ» на месте');
+      ok(ctl.calls.every((c) => c.host === 'api-test.smartsol.pro'), 'вход и данные — только с тестового сервера');
+      const box = await bar.boundingBox();
+      const top = await page.locator('.screen:not(.leaving) .org-pill').boundingBox();
+      ok(box && top && top.y >= box.y + box.height - 1, 'плашка не закрывает экран: содержимое сдвинуто вниз');
+      ok((await page.evaluate(() => localStorage.getItem('finpuls-session'))) === null && !!(await page.evaluate(() => sessionStorage.getItem('finpuls-session'))), 'признак входа тестовой вкладки — в sessionStorage; рабочий localStorage не тронут');
+      ok((await page.locator('.sheet .push-offer').count()) === 0 && !ctl.calls.some((c) => c.path === '/devices'), 'push в тестовой вкладке не предлагается и не регистрируется');
+      await shot(page, '12-test-plashka');
+      await page.locator('.tabbar .tab[data-go="#/requests"]').click();
+      await settle(page, 800);
+      await page.reload();
+      await settle(page, 1200);
+      ok((await bar.isVisible()) && (await page.evaluate(() => location.hash)) === '#/requests' && ctl.calls.every((c) => c.host === 'api-test.smartsol.pro'), 'переходы и перезагрузка вкладки — режим «ТЕСТ» сохраняется');
+      // соседняя вкладка без параметра — рабочий сервер
+      const ctl2 = { state: {}, popups: [] };
+      const page2 = await ctx.newPage();
+      await mockApi(page2, ctl2);
+      await page2.goto(BASE);
+      await settle(page2, 900);
+      ok((await page2.locator('.env-bar').count()) === 0 && ctl2.calls.length > 0 && ctl2.calls.every((c) => c.host === 'api.smartsol.pro'), 'соседняя вкладка без параметра — рабочий сервер, без плашки');
+      ok((await page2.evaluate(() => location.hash)) === '#/login', 'вход тестовой вкладки на рабочую не распространяется');
+      await page2.close();
+      // «Выйти» на плашке — обратно на рабочий сервер
+      const mark = ctl.calls.length;
+      await bar.locator('button').click();
+      await page.waitForFunction(() => !location.search && location.hash === '#/login', null, { timeout: 8000 });
+      await settle(page, 900);
+      ok((await page.locator('.env-bar').count()) === 0 && ctl.calls.slice(mark).length > 0 && ctl.calls.slice(mark).every((c) => c.host === 'api.smartsol.pro'), '«Выйти» на плашке — вкладка снова на рабочем сервере, плашки нет');
+      await page.goto(`${BASE}?api=https://evil.example/api/v1`);
+      await settle(page, 900);
+      ok((await page.locator('.env-bar').count()) === 0 && ctl.calls.slice(mark).every((c) => c.host === 'api.smartsol.pro'), 'чужой адрес в параметре не принимается: значение сверяется только со словом test');
+      noErrors(errors);
+      await ctx.close();
+    }
+
+    // ---------- 1в. залпы одинаковых запросов ----------
+    console.log('\n▶ Один экран — один запрос каждого вида (без залпов)');
+    {
+      const { ctx, page, errors, ctl } = await newCtx(devices['iPhone 13'], { orgs: [ORG, ORG2] });
+      const st = ctl.state;
+      const gets = (p, from = 0) => ctl.calls.slice(from).filter((c) => c.method === 'GET' && c.path === p).length;
+      const tabBtn = (h) => page.locator(`.tabbar .tab[data-go="${h}"]`);
+      const hammer = async (h, n = 5) => {
+        for (let i = 0; i < n; i++) await tabBtn(h).click();
+      };
+      await page.goto(BASE);
+      await settle(page, 800);
+      await login(page, ctl, { expect: '#/orgs' });
+      await page.locator('[data-act="pick-org"][data-id="org_test"]').click();
+      await settle(page, 900);
+      ok((await page.evaluate(() => location.hash)) === '#/home', 'вход → главная');
+      ok(gets('/orgs/org_test/summary') === 1 && gets('/orgs') === 1, `открытие главной: один summary и один orgs (было ${gets('/orgs/org_test/summary')} и ${gets('/orgs')})`);
+      // возврат во вкладку браузера и в приложение из фона
+      let mark = ctl.calls.length;
+      await page.evaluate(() => {
+        for (let i = 0; i < 4; i++) {
+          document.dispatchEvent(new Event('visibilitychange'));
+          window.dispatchEvent(new Event('focus'));
+          window.dispatchEvent(new Event('pageshow'));
+          window.dispatchEvent(new Event('online'));
+        }
+      });
+      await settle(page, 900);
+      ok(ctl.calls.length === mark, `возврат на вкладку (visibilitychange, focus) не даёт ни одного запроса (было ${ctl.calls.length - mark})`);
+      // медленный сервер: 1С отвечает секунду — нетерпеливые нажатия не плодят запросы
+      st.delay = 900;
+      await tabBtn('#/requests').click();
+      await page.waitForSelector('.screen:not(.leaving) .req-list', { timeout: 8000 });
+      mark = ctl.calls.length;
+      await hammer('#/home');
+      await page.waitForSelector('.screen:not(.leaving) .hero', { timeout: 8000 });
+      await settle(page, 400);
+      ok(gets('/orgs/org_test/summary', mark) === 1, `5 нажатий на «Главная», пока она грузится, — один summary (было ${gets('/orgs/org_test/summary', mark)})`);
+      mark = ctl.calls.length;
+      await hammer('#/requests');
+      await page.waitForSelector('.screen:not(.leaving) .req-list', { timeout: 8000 });
+      await settle(page, 400);
+      ok(gets('/orgs/org_test/requests', mark) === 1, `5 нажатий на «Заявки» — один requests (было ${gets('/orgs/org_test/requests', mark)})`);
+      mark = ctl.calls.length;
+      await hammer('#/profile');
+      await page.waitForSelector('.screen:not(.leaving) .me-card', { timeout: 8000 });
+      await settle(page, 400);
+      ok(gets('/me', mark) === 1 && gets('/orgs', mark) === 1 && gets('/me/settings', mark) === 1, `5 нажатий на «Профиль» — по одному /me, /orgs, /me/settings (было ${gets('/me', mark)}, ${gets('/orgs', mark)}, ${gets('/me/settings', mark)})`);
+      // переключение организации в профиле — без перечитывания профиля
+      mark = ctl.calls.length;
+      await page.locator('[data-act="switch-org"][data-id="org_two"]').click();
+      await settle(page, 600);
+      ok(ctl.calls.length === mark, `переключение организации в профиле — без запросов (было ${ctl.calls.length - mark})`);
+      ok((await page.locator('[data-act="switch-org"][data-id="org_two"] .li-check').count()) === 1 && (await page.locator('[data-act="switch-org"][data-id="org_test"] .li-radio').count()) === 1, 'отметка выбранной организации переставлена');
+      await page.locator('[data-act="switch-org"][data-id="org_test"]').click();
+      await settle(page, 300);
+      // «Назад» браузера: popstate и hashchange приходят парой — загрузка одна
+      mark = ctl.calls.length;
+      await page.goBack();
+      await page.waitForSelector('.screen:not(.leaving) .req-list', { timeout: 8000 });
+      await settle(page, 1200);
+      ok(gets('/orgs/org_test/requests', mark) === 1, `«Назад» браузера — один requests (было ${gets('/orgs/org_test/requests', mark)})`);
+      mark = ctl.calls.length;
+      await page.evaluate(() => { location.hash = '#/home'; });
+      await page.waitForSelector('.screen:not(.leaving) .hero', { timeout: 8000 });
+      await settle(page, 1200);
+      ok(gets('/orgs/org_test/summary', mark) === 1, `смена адреса (hashchange) — один summary (было ${gets('/orgs/org_test/summary', mark)})`);
+      // «Обновить» на экране ошибки, пока ответ ещё идёт, — один запрос
+      ctl.override = (call, { err }) => (call.path === '/orgs/org_test/summary' ? (err(503, 'source_unavailable', 'Учёт компании не отвечает'), true) : false);
+      await tabBtn('#/requests').click();
+      await page.waitForSelector('.screen:not(.leaving) .req-list', { timeout: 8000 });
+      await tabBtn('#/home').click();
+      await page.waitForSelector('.screen:not(.leaving) .err-state', { timeout: 8000 });
+      ctl.override = null;
+      mark = ctl.calls.length;
+      for (let i = 0; i < 4; i++) await page.locator('.screen:not(.leaving) [data-act="retry"]').click();
+      await page.waitForSelector('.screen:not(.leaving) .hero', { timeout: 8000 });
+      await settle(page, 400);
+      ok(gets('/orgs/org_test/summary', mark) === 1, `4 нажатия «Обновить» после ошибки — один summary (было ${gets('/orgs/org_test/summary', mark)})`);
+      // слой API: два одинаковых GET одновременно — один запрос; POST не склеиваются
+      mark = ctl.calls.length;
+      const same = await page.evaluate(async () => {
+        const { api } = await import('./js/api/index.js');
+        const org = api.orgId();
+        const [a, b, c] = await Promise.all([api.home(org), api.summary(org), api.home(org)]);
+        const p = await Promise.allSettled([api.markRead(org, 'n_a'), api.markRead(org, 'n_a')]);
+        return { ok: a.money.total === c.money.total && b.money.total === a.money.total, posts: p.length };
+      });
+      ok(same.ok && gets('/orgs/org_test/summary', mark) === 1, `слой API: три одновременных чтения сводки — один GET (было ${gets('/orgs/org_test/summary', mark)})`);
+      ok(ctl.calls.slice(mark).filter((c) => c.method === 'POST' && c.path === '/notifications/read').length === 2, 'слой API: POST не склеиваются — ушли оба');
+      mark = ctl.calls.length;
+      await page.evaluate(async () => {
+        const { api } = await import('./js/api/index.js');
+        await api.home(api.orgId());
+        await api.home(api.orgId());
+      });
+      ok(gets('/orgs/org_test/summary', mark) === 2, 'слой API: ответ не запоминается — следующий запрос после ответа идёт в сеть');
+      noErrors(errors);
+      await ctx.close();
+    }
+
+    // ---------- 1г. заявка с несколькими статьями ----------
+    console.log('\n▶ Заявка с двумя статьями: превышение лимита — по доле статьи (over_by), не по всей сумме');
+    {
+      const { ctx, page, errors, ctl } = await newCtx(devices['iPhone 13'], { multi: true });
+      await page.goto(BASE);
+      await settle(page, 800);
+      await login(page, ctl);
+      await page.locator('.tabbar .tab[data-go="#/requests"]').click();
+      await settle(page, 800);
+      ok((await page.locator('.screen:not(.leaving) .req-card').count()) === 2 && (await page.locator('.screen:not(.leaving) .tag-warn').count()) === 1, 'в списке две заявки, «Сверх лимита» — по over_limit из ответа');
+      await page.locator('.req-card[data-go="#/requests/req_2"]').click();
+      await settle(page, 800);
+      const b = MULTI.budgets[0];
+      const bud = page.locator('.screen:not(.leaving) [data-budget]');
+      const txt = norm(await bud.innerText());
+      ok(txt.includes('Превышение лимита на 200 000 ₸') && Number(await bud.getAttribute('data-over')) === b.over_by, `превышение на экране = over_by из ответа (${b.over_by}), а не по всей сумме заявки (800 000)`);
+      ok(txt.includes('По статье') && txt.includes('900 000 ₸') && Number(await bud.getAttribute('data-part')) === b.this_request, '«По статье» — доля this_request (900 000), не вся сумма (1 500 000)');
+      ok(txt.includes('+10% к бюджету статьи'), 'процент превышения — от доли статьи (+10%)');
+      ok(norm(await page.locator('[data-bud-split]').innerText()).includes('из 1 500 000 ₸ приходится 900 000 ₸'), 'пояснение: в заявке несколько статей');
+      const w = await page.locator('.screen:not(.leaving) .bud-req').evaluate((e) => parseFloat(e.style.width));
+      ok(Math.abs(w - (900000 / 2200000) * 100) < 0.02, `полоска заявки — по доле статьи (${w}%)`);
+      await shot(page, '13-zayavka-dve-stati');
+      await page.locator('.screen:not(.leaving) [data-act="approve"]').click();
+      await settle(page, 500);
+      ok(norm(await page.locator('.sheet .over-note').innerText()).includes('Сверх лимита на 200 000 ₸'), 'подтверждение согласования — то же превышение (200 000)');
+      await page.locator('.sheet [data-act="sheet-close"]').click();
+      await settle(page, 400);
+      // заявка с одной статьёй — как раньше
+      await page.evaluate(() => { location.hash = '#/requests/req_1'; });
+      await settle(page, 800);
+      const one = norm(await page.locator('.screen:not(.leaving) [data-budget]').innerText());
+      ok(one.includes('Эта заявка') && one.includes('1 500 000 ₸') && one.includes('В пределах лимита') && (await page.locator('[data-bud-split]').count()) === 0, 'заявка с одной статьёй — без изменений');
       noErrors(errors);
       await ctx.close();
     }
@@ -598,7 +969,7 @@ const PUSH_STUB = () => {
       const keys = dec.slice(-2).map((c) => c.headers['idempotency-key']);
       ok(keys.length === 2 && keys[0] && keys[0] === keys[1], 'повтор с тем же Idempotency-Key');
       ok(dec.length >= 2 && dec[0].headers['idempotency-key'] !== keys[0], 'новое нажатие — новый ключ');
-      ok(dec.every((c) => c.headers['x-app-version'] === '1.0.0' && c.method === 'POST'), 'POST …/approve с X-App-Version');
+      ok(dec.every((c) => c.headers['x-app-version'] === APP_VERSION && c.method === 'POST'), 'POST …/approve с X-App-Version');
       await page.waitForFunction(() => location.hash === '#/requests');
       await settle(page, 1400);
       ok(await page.locator('.screen:not(.leaving) .req-card').count() === 0, 'заявка ушла из «На согласовании»');
@@ -757,7 +1128,7 @@ const PUSH_STUB = () => {
       await page.locator('.sheet [data-act="push-enable"]').click();
       await settle(page, 900);
       const dev = ctl.calls.find((c) => c.path === '/devices' && c.method === 'POST');
-      ok(dev && dev.body.platform === 'web' && dev.body.provider === 'webpush' && dev.body.subscription.endpoint && dev.body.subscription.keys.p256dh && dev.body.app_version === '1.0.0', 'POST /devices {platform: web, provider: webpush, subscription, app_version}');
+      ok(dev && dev.body.platform === 'web' && dev.body.provider === 'webpush' && dev.body.subscription.endpoint && dev.body.subscription.keys.p256dh && dev.body.app_version === APP_VERSION, 'POST /devices {platform: web, provider: webpush, subscription, app_version}');
       ok(await page.evaluate(() => !!(window.__subOpts && window.__subOpts.applicationServerKey && window.__subOpts.applicationServerKey.length === 65)), 'подписка с ключом webpush_public_key из GET /version');
       ok(norm(await page.locator('.toast').innerText()).includes('Уведомления включены'), '«Уведомления включены»');
       // открытие из push: ?org=&n= → заявка и отметка прочитанным

@@ -110,8 +110,14 @@ export function decided(o = org()) {
   const key = (r) => (r.decision?.d ?? 0) * 10000 + Number((r.decision?.t || '00:00').replace(':', ''));
   return requests(o).filter((r) => r.status !== 'pending').sort((a, b) => key(b) - key(a));
 }
+// Доля заявки по основной статье: у заявки с несколькими статьями (lines) — сумма строк этой статьи, иначе вся сумма.
+export function budgetPart(r) {
+  const own = (r.lines || []).filter((l) => l.article === r.article);
+  return own.length ? sum(own, (l) => l.amount) : r.amount;
+}
+// Превышение лимита основной статьи — от доли заявки по статье, а не от всей суммы (как over_by в учёте).
 export function overLimit(r) {
-  return Math.max(0, r.budget.used + r.amount - r.budget.limit);
+  return Math.max(0, r.budget.used + budgetPart(r) - r.budget.limit);
 }
 
 export function decide(id, status, comment = '') {

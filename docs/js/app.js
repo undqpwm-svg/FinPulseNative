@@ -1,5 +1,5 @@
 // Точка входа: роутер на хешах, асинхронная загрузка экранов, ошибки без белого экрана, переходы, нижняя навигация.
-import { CONFIG } from './config.js';
+import { CONFIG, isTestEnv, leaveTestEnv } from './config.js';
 import { api, setMode, ApiError } from './api/index.js';
 import { views, actions, errorView, onUnauthorized, invalidate, rememberLink } from './screens.js';
 import { nav, navigate, back, closeSheet, sheetOpen, histIdx, loading } from './ui.js';
@@ -24,6 +24,7 @@ const DETAIL_META = { notifications: ['Уведомления', '#/home'], orgs:
 let current = null; // { key, el, depth, tab }
 let lastHash = null;
 let seq = 0; // номер последней навигации: устаревшие ответы не рисуем
+let loadingHash = null; // адрес экрана, который сейчас грузится (ответа сервера ещё нет)
 const DUR = 340;
 
 function parse() {
@@ -62,6 +63,9 @@ const splash = () => ({
 });
 
 async function route() {
+  // Адрес запоминаем сразу, до первого ожидания: браузер на «Назад» и на смену адреса присылает подряд popstate и
+  // hashchange — второе событие должно увидеть, что этот адрес уже открывается, и не запускать загрузку ещё раз.
+  lastHash = location.hash;
   let r = parse();
   // #/demo — включить демо для показов (ссылка «Посмотреть демо», QR на презентации).
   if (r.name === 'demo') {
@@ -101,6 +105,7 @@ async function route() {
   }
   lastHash = location.hash;
   const my = ++seq;
+  loadingHash = lastHash;
   if (sheetOpen()) closeSheet(true);
   app.querySelectorAll('.done-overlay').forEach((e) => e.remove());
   let dir = nav.pendingDir;
@@ -125,7 +130,10 @@ async function route() {
     v = errorView(e, errorMeta(r));
   } finally {
     clearTimeout(timer);
-    if (my === seq) loading(false);
+    if (my === seq) {
+      loading(false);
+      loadingHash = null;
+    }
   }
   if (my !== seq) return; // пока грузили, пользователь ушёл на другой экран
   if (v.redirect) {
@@ -145,6 +153,12 @@ async function route() {
 
 nav.route = route;
 nav.rerender = route; // тот же экран — перерисовка на месте, без анимации перехода
+// Повторный переход на адрес, который уже открыт (ещё раз нажали вкладку или ту же кнопку). Экран ещё грузится —
+// ничего не делаем: ответ уже в пути, новое нажатие не должно слать те же запросы заново. Загружен — обновляем.
+nav.revisit = () => {
+  if (loadingHash !== null && loadingHash === location.hash) return;
+  route();
+};
 // назад/вперёд в браузере и ручная правка адреса
 const onHistory = () => {
   if (location.hash !== lastHash) route();
@@ -200,7 +214,7 @@ function show(v, dir) {
 }
 
 function chrome(v) {
-  document.title = v.title ? `${v.title} · ФинПульс` : 'ФинПульс';
+  document.title = `${isTestEnv() ? 'ТЕСТ · ' : ''}${v.title ? `${v.title} · ФинПульс` : 'ФинПульс'}`;
   const dark = v.theme === 'dark';
   app.classList.toggle('theme-dark', dark);
   document.documentElement.classList.toggle('theme-dark', dark);
@@ -278,6 +292,26 @@ function tick() {
 }
 tick();
 setInterval(tick, 20000);
+
+// ---------- тестовый сервер: постоянная плашка «ТЕСТ» ----------
+// Видна на всех экранах, пока вкладка ходит на тестовый сервер (адрес с ?api=test, см. config.js).
+if (isTestEnv()) {
+  document.documentElement.classList.add('env-test');
+  const bar = document.createElement('div');
+  bar.className = 'env-bar';
+  bar.setAttribute('role', 'status');
+  let host = CONFIG.apiBase;
+  try {
+    host = new URL(CONFIG.apiBase).host;
+  } catch (e) {
+    /* адрес как есть */
+  }
+  bar.innerHTML = '<b>ТЕСТ</b><span></span><button type="button">Выйти</button>';
+  bar.querySelector('span').textContent = `тестовый сервер ${host}`;
+  bar.querySelector('button').setAttribute('aria-label', 'Выйти из тестового режима — вернуться на рабочий сервер');
+  bar.querySelector('button').addEventListener('click', leaveTestEnv);
+  app.appendChild(bar);
+}
 
 // ---------- запуск ----------
 window.addEventListener('popstate', onHistory);

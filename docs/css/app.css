@@ -981,6 +981,13 @@ html.framed .loadbar { top: 50px; left: 24px; right: 24px; }
 .tg-label { margin: 22px 0 0; font-size: 12.5px; font-weight: 500; color: rgba(244, 241, 234, 0.55); }
 .tg-label + .tg-field { margin-top: 8px; }
 [data-tg-device="new"] .tg-sub { margin-bottom: 16px; }
+/* новое устройство, до нажатия кнопки: только текст и крупная кнопка; поле кода, «Вставить код», «Войти» — после */
+[data-tg-step="confirm"] .tg-label, [data-tg-step="confirm"] .tg-field, [data-tg-step="confirm"] .tg-under,
+[data-tg-step="confirm"] #tg-code-err, [data-tg-step="confirm"] [data-tg-actions], [data-tg-step="confirm"] .tg-warn { display: none; }
+[data-tg-step="confirm"] .tg-help { padding: 18px 16px 16px; }
+[data-tg-step="confirm"] .tg-help .tg-note { margin-bottom: 16px; font-size: 16px; line-height: 1.45; }
+[data-tg-step="confirm"] .tg-help .btn { height: 62px; font-size: 17.5px; border-radius: 19px; }
+[data-tg-step="confirm"] .tg-help .btn .ic { width: 22px; height: 22px; }
 .tg-sub .link-btn { display: inline; height: auto; padding: 0; font-size: inherit; }
 .tg-sub [data-tg-phone] { color: var(--milk); font-weight: 600; white-space: nowrap; font-variant-numeric: tabular-nums; }
 /* номер телефона на экране входа */

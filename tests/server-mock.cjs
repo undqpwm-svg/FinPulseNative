@@ -27,9 +27,9 @@ const API_HOSTS = [API, API_TEST].map((u) => new URL(u).host);
 const BOT = 'https://t.me/finpulse_smartsol_bot';
 // Текст на экране ввода кода — дословно от заказчика, один для любого номера (контракт, 2).
 const NOTE = 'Если номер подключён, код придёт в Telegram в течение минуты. Не пришёл — нажмите „Войти через Telegram“ или обратитесь к администратору вашей компании.';
-// Экран «Новое устройство» (device: new): до нажатия «Войти через Telegram» и после.
-const NEW_NOTE = 'Код сам не придёт: вход с этого устройства нужно подтвердить в Telegram. Нажмите „Войти через Telegram“ — бот пришлёт код. При первом входе он попросит „Поделиться номером“.';
-const NEW_DONE = 'В Telegram нажмите на код в сообщении бота — он скопируется. Вернитесь сюда и вставьте его.';
+// Экран нового устройства (device: new) — «Подтвердите вход в Telegram»: до нажатия «Войти через Telegram» и после.
+const NEW_NOTE = 'С этого устройства вход нужно один раз подтвердить в Telegram. Нажмите кнопку — бот пришлёт код.';
+const NEW_DONE = 'Нажмите на код в сообщении бота — он скопируется. Вернитесь сюда и вставьте его.';
 const SHOTS = path.join(__dirname, '..', 'screenshots', 'server');
 const SAVE = process.argv.includes('--shots');
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.webmanifest': 'application/manifest+json' };
@@ -392,11 +392,11 @@ const PUSH_STUB = () => {
       const input = () => page.locator('.screen:not(.leaving) [data-tg-input]');
       const confirms = () => ctl.calls.filter((c) => c.path === '/auth/telegram/confirm');
       const polls = () => ctl.calls.filter((c) => c.path === '/auth/telegram/poll');
-      // Начать вход с экрана входа: номер → «Получить код» → экран кода
+      // Начать вход с экрана входа: номер → «Получить код» → экран после start (на новом устройстве поля кода ещё нет)
       const begin = async (number = '7015551234') => {
         await phone().fill(number);
         await startBtn().click();
-        await input().waitFor({ timeout: 8000 });
+        await page.locator('.screen:not(.leaving) [data-tg-open]').waitFor({ timeout: 8000 });
       };
       // «Начать заново» на экране кода: тот же номер, новый экран кода
       const restart = async () => {
@@ -443,20 +443,21 @@ const PUSH_STUB = () => {
       await page.reload();
       await settle(page, 900);
 
-      // start → device: new → экран «Новое устройство» (от номера не зависит)
+      // start → device: new → экран «Подтвердите вход в Telegram» (от номера не зависит)
       await begin();
       await settle(page, 900);
       const start = starts().slice(-1)[0];
       ok(start.method === 'POST' && JSON.stringify(start.body) === JSON.stringify({ phone: '+77015551234' }) && !start.headers.authorization, 'POST /auth/telegram/start {phone: "+77015551234"}, без Authorization');
       ok((await page.evaluate(() => window.__cred)).filter((c) => c.url.includes('/auth/telegram/start')).every((c) => c.credentials === 'include'), 'start — с credentials: include (метка знакомого устройства в cookie)');
       ok(ctl.popups.length === 0, 'bot_url сразу не открывается');
-      ok((await page.locator('[data-tg-device]').getAttribute('data-tg-device')) === 'new' && norm(await page.locator('.login-title').innerText()) === 'Новое устройство', 'device: new → экран «Новое устройство»');
+      ok((await page.locator('[data-tg-device]').getAttribute('data-tg-device')) === 'new' && norm(await page.locator('.login-title').innerText()) === 'Подтвердите вход в Telegram', 'device: new → экран «Подтвердите вход в Telegram»');
+      ok((await input().isHidden()) && (await page.locator('[data-tg-paste]').isHidden()) && (await page.locator('[data-tg-submit]').isHidden()), 'до нажатия кнопки поля кода, «Вставить код» и «Войти» на экране нет');
       ok(norm(await page.locator('[data-tg-phone]').innerText()) === '+7 701 555 12 34' && norm(await page.locator('[data-tg-change]').innerText()) === 'Изменить номер', 'на экране — введённый номер и «Изменить номер»');
       ok((await page.locator('[data-tg-code]').count()) === 0, 'числа для выбора на экране нет');
       ok((await page.locator('.tg-cells i').count()) === 6, 'поле кода — по code_length (6 цифр)');
       ok((await input().getAttribute('inputmode')) === 'numeric' && (await input().getAttribute('autocomplete')) === 'one-time-code', 'поле: inputmode="numeric", autocomplete="one-time-code"');
       ok(await page.locator('[data-tg-submit]').isDisabled(), '«Войти» неактивна, пока код не введён целиком');
-      ok(norm(await page.locator('[data-tg-note]').innerText()) === NEW_NOTE, 'новое устройство: объяснение — код сам не придёт, нужно «Войти через Telegram»');
+      ok(norm(await page.locator('[data-tg-note]').innerText()) === NEW_NOTE, 'новое устройство: текст заказчика — вход нужно один раз подтвердить в Telegram');
       const openBtn = page.locator('.screen:not(.leaving) [data-tg-open]');
       ok(norm(await openBtn.innerText()).includes('Войти через Telegram') && (await openBtn.getAttribute('href')) === `${BOT}?start=n_${st.starts}` && (await openBtn.getAttribute('target')) === '_blank', 'кнопка «Войти через Telegram» — ссылка bot_url этого входа');
       ok(await openBtn.evaluate((e) => e.classList.contains('btn-primary')), 'новое устройство: «Войти через Telegram» — главная кнопка');
@@ -465,9 +466,8 @@ const PUSH_STUB = () => {
         const field = document.querySelector('.screen:not(.leaving) [data-tg-field]');
         return !!(help.compareDocumentPosition(field) & Node.DOCUMENT_POSITION_FOLLOWING);
       }), 'новое устройство: поле кода — ниже кнопки бота');
-      ok(norm(await page.locator('[data-tg-status]').innerText()) === 'Код действует 5 минут' && (await page.locator('[data-tg-left]').count()) === 0, '«Код действует 5 минут» — подсказка без таймера');
       ok(!/не подключ/i.test(norm(await page.locator('.screen:not(.leaving)').innerText())), 'сообщения «номер не подключён» на экране нет');
-      await shot(page, '02a-novoe-ustroystvo');
+      await shot(page, '02a-podtverdite-vhod');
       await settle(page, 1300);
       ok(polls().length >= 1 && polls().every((c) => c.body.challenge_id === st.challenge && !c.headers.authorization), 'POST /auth/telegram/poll с challenge_id, без Authorization');
       ok((await page.locator('#tg-err').isHidden()) && (await page.evaluate(() => location.hash)) === '#/telegram' && confirms().length === 0, '202 pending — вход жив, экран не меняется');
@@ -478,7 +478,9 @@ const PUSH_STUB = () => {
       ok(ctl.popups.some((p) => p.url().startsWith(`${BOT}?start=n_${st.starts}`)) && st.starts === startsBefore && (await page.evaluate(() => location.hash)) === '#/telegram', '«Войти через Telegram» открывает bot_url, новый start не уходит');
       ok(norm(await page.locator('.login-title').innerText()) === 'Введите код из Telegram' && norm(await page.locator('[data-tg-note]').innerText()) === NEW_DONE, 'после нажатия экран — про ввод кода: «нажмите на код… вернитесь сюда и вставьте»');
       ok(norm(await openBtn.innerText()).includes('Открыть Telegram ещё раз') && !(await openBtn.evaluate((e) => e.classList.contains('btn-primary'))), 'кнопка бота стала запасной: «Открыть Telegram ещё раз»');
-      await shot(page, '02b-novoe-ustroystvo-posle-bota');
+      ok((await input().isVisible()) && (await page.locator('[data-tg-paste]').isVisible()) && (await page.locator('[data-tg-submit]').isVisible()), 'после нажатия появились поле кода, «Вставить код» и «Войти»');
+      ok(norm(await page.locator('[data-tg-status]').innerText()) === 'Код действует 5 минут' && (await page.locator('[data-tg-left]').count()) === 0, '«Код действует 5 минут» — подсказка без таймера');
+      await shot(page, '02b-posle-knopki-vvedite-kod');
 
       // неполный код не отправляется
       await input().fill('12345');
@@ -657,9 +659,11 @@ const PUSH_STUB = () => {
       await settle(page, 800);
       await page.locator('#login-phone').fill('7015551234');
       await page.locator('[data-act="tg-start"]').click();
-      await page.locator('.screen:not(.leaving) [data-tg-input]').waitFor({ timeout: 8000 });
+      await page.locator('.screen:not(.leaving) [data-tg-open]').waitFor({ timeout: 8000 });
       await settle(page, 700);
-      ok((await page.locator('[data-tg-device]').getAttribute('data-tg-device')) === 'new' && norm(await page.locator('.login-title').innerText()) === 'Новое устройство', 'нет поля device → экран «Новое устройство»');
+      ok((await page.locator('[data-tg-device]').getAttribute('data-tg-device')) === 'new' && norm(await page.locator('.login-title').innerText()) === 'Подтвердите вход в Telegram', 'нет поля device → экран «Подтвердите вход в Telegram»');
+      await page.locator('.screen:not(.leaving) [data-tg-open]').click();
+      await settle(page, 600);
       await page.locator('.screen:not(.leaving) [data-tg-input]').fill(ctl.state.code);
       await page.waitForFunction(() => location.hash === '#/home', null, { timeout: 12000 });
       ok(true, 'код с этого экрана принимается → вход выполнен');

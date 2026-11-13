@@ -116,18 +116,19 @@ async function runFlow(browser, name, opts, isPhone) {
   // вход: номер → экран кода (один для всех) → «Войти через Telegram» → «бот» просит номер и присылает код
   await tap(page, '[data-act="tg-start"]');
   await settle(page, 1300);
-  ok((await screenKey(page)) === '#/telegram', 'экран «Введите код из Telegram»');
-  ok((await page.locator('.screen:not(.leaving) .login-title').innerText().then(norm)).includes('Введите код из Telegram'), 'заголовок «Введите код из Telegram»');
+  ok((await screenKey(page)) === '#/telegram', 'экран после «Получить код»');
+  ok((await page.locator('.screen:not(.leaving) .login-title').innerText().then(norm)) === 'Новое устройство', 'первый вход: экран «Новое устройство»');
   ok(await page.locator('.screen:not(.leaving) [data-tg-code]').count() === 0, 'числа для выбора больше нет');
   const field = page.locator('.screen:not(.leaving) [data-tg-input]');
   ok(await page.locator('.screen:not(.leaving) .tg-cells i').count() === 6 && (await field.getAttribute('autocomplete')) === 'one-time-code' && (await field.getAttribute('inputmode')) === 'numeric', 'поле кода: 6 цифр, цифровая клавиатура, one-time-code');
-  ok((await page.locator('.screen:not(.leaving) [data-tg-note]').innerText().then(norm)) === 'Если номер подключён, код придёт в Telegram в течение минуты. Не пришёл — нажмите „Войти через Telegram“ или обратитесь к администратору вашей компании.', 'нейтральный текст — дословно');
+  ok((await page.locator('.screen:not(.leaving) [data-tg-note]').innerText().then(norm)) === 'Код сам не придёт: вход с этого устройства нужно подтвердить в Telegram. Нажмите „Войти через Telegram“ — бот пришлёт код. При первом входе он попросит „Поделиться номером“.', 'новое устройство: код сам не придёт, нужно «Войти через Telegram»');
+  ok(await page.locator('.screen:not(.leaving) [data-tg-open]').evaluate((e) => e.classList.contains('btn-primary')), '«Войти через Telegram» — главная кнопка');
   ok((await page.locator('.screen:not(.leaving) [data-tg-status]').innerText().then(norm)) === 'Код действует 5 минут', 'подсказка «Код действует 5 минут», без таймера');
   ok((await page.locator('.screen:not(.leaving) [data-tg-phone]').innerText().then(norm)) === '+7 701 555 12 34', 'на экране кода — введённый номер');
   await settle(page, 1800);
   ok(await page.locator('.sheet-wrap').count() === 0, 'первый вход с устройства: бот сам не открывается и код сам не приходит');
   await noHScroll(page, 'Ввод кода');
-  if (isPhone) await shot(page, '02a-vvedite-kod');
+  if (isPhone) await shot(page, '02a-novoe-ustroystvo');
   await tap(page, '[data-tg-open]');
   await settle(page, 500);
   ok((await page.locator('.sheet-wrap .tgbot').innerText().then(norm)).includes('Нажмите «Поделиться номером»'), '«Войти через Telegram» → демо-бот просит «Поделиться номером»');
@@ -143,6 +144,9 @@ async function runFlow(browser, name, opts, isPhone) {
   if (isPhone) await shot(page, '02c-demo-bot-kod');
   await tap(page, '[data-act="sheet-close"].btn');
   await settle(page, 450);
+  ok((await page.locator('.screen:not(.leaving) .login-title').innerText().then(norm)) === 'Введите код из Telegram' && (await page.locator('.screen:not(.leaving) [data-tg-note]').innerText().then(norm)) === 'В Telegram нажмите на код в сообщении бота — он скопируется. Вернитесь сюда и вставьте его.', 'после бота экран — про ввод кода');
+  ok((await page.locator('.screen:not(.leaving) [data-tg-open]').innerText().then(norm)).includes('Открыть Telegram ещё раз'), 'кнопка бота — «Открыть Telegram ещё раз»');
+  if (isPhone) await shot(page, '02d-posle-bota-vvedite-kod');
   // неверный код → «Осталось попыток: 4», поле очищено
   const wrong = code1 === '000000' ? '111111' : '000000';
   await field.fill(wrong);
@@ -150,7 +154,7 @@ async function runFlow(browser, name, opts, isPhone) {
   ok((await page.locator('.screen:not(.leaving) #tg-code-err').innerText().then(norm)).includes('Неверный код. Осталось попыток: 4'), 'неверный код — «Осталось попыток: 4»');
   ok((await field.inputValue()) === '', 'поле кода очищено');
   await settle(page, 300);
-  if (isPhone) await shot(page, '02d-nevernyy-kod');
+  if (isPhone) await shot(page, '02e-nevernyy-kod');
   // «Войти через Telegram» ещё раз → код не повторяется; нажатие на код копирует его → «Вставить код» → вход
   await tap(page, '[data-tg-open]');
   await settle(page, 500);
@@ -460,9 +464,14 @@ async function runFlow(browser, name, opts, isPhone) {
   await settle(page, 500);
   const autoTxt = await page.locator('.sheet-wrap').innerText().then(norm);
   ok(autoTxt.includes('Код для входа в ФинПульс:') && !autoTxt.includes('Поделиться номером') && autoTxt.includes('бот присылает код сам'), 'знакомое устройство: бот прислал код сам, без «Поделиться номером»');
-  if (isPhone) await shot(page, '02e-kod-prishel-sam');
+  if (isPhone) await shot(page, '02g-kod-prishel-sam');
   await page.locator('.sheet-wrap .tgbot-code').click();
   await page.waitForFunction(() => !document.querySelector('.sheet-wrap'), null, { timeout: 6000 });
+  ok((await page.locator('.screen:not(.leaving) .login-title').innerText().then(norm)) === 'Введите код из Telegram' && (await page.locator('.screen:not(.leaving) [data-tg-note]').innerText().then(norm)) === 'Если номер подключён, код придёт в Telegram в течение минуты. Не пришёл — нажмите „Войти через Telegram“ или обратитесь к администратору вашей компании.', 'знакомое устройство: экран «Введите код из Telegram» с нейтральным текстом');
+  ok(!(await page.locator('.screen:not(.leaving) [data-tg-open]').evaluate((e) => e.classList.contains('btn-primary'))), 'знакомое устройство: «Войти через Telegram» — запасная кнопка');
+  await page.waitForFunction(() => !document.querySelector('.toast.show'), null, { timeout: 5000 });
+  await settle(page, 450); // всплывающая подсказка «Код скопирован» гаснет не сразу
+  if (isPhone) await shot(page, '02f-znakomoe-ustroystvo');
   await tap(page, '[data-tg-paste]');
   await page.waitForFunction(() => location.hash === '#/orgs', null, { timeout: 8000 });
   await settle(page, 700);

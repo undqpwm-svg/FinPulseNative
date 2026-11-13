@@ -58,8 +58,9 @@ export async function startLogin(phone) {
   tg.ch = ch;
   // Знакомое устройство: бот сам пишет в чат через пару секунд после начала входа.
   if (ch.auto) setTimeout(() => tg.ch === ch && !ch.sentAt && sendCode(ch), 1200);
-  // Ответ одинаков для любого номера; demoAuto — только для демо: когда показать «уведомление Telegram».
-  return { challengeId: ch.id, botUrl: null, codeLength: CODE_LENGTH, expiresIn: CODE_TTL, pollInterval: 2, demoBot: true, demoAuto: ch.auto };
+  // От номера ответ не зависит. device: known — устройство «знакомо», бот пришлёт код сам; new — «Новое устройство».
+  // demoAuto — только для демо: когда показать «уведомление Telegram».
+  return { challengeId: ch.id, botUrl: null, codeLength: CODE_LENGTH, expiresIn: CODE_TTL, pollInterval: 2, device: ch.auto ? 'known' : 'new', demoBot: true, demoAuto: ch.auto };
 }
 
 // Что показывает «бот», когда его открыли по кнопке «Войти через Telegram» (или пришло его сообщение):

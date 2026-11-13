@@ -411,28 +411,46 @@ function tgSignedIn() {
   setTimeout(() => navigate('#/orgs', 'push'), 450);
 }
 
-// Ввод кода (контракт, 2): экран один для любого номера — поле кода, нейтральный текст и кнопка «Войти через Telegram».
-// Сервер не сообщает, отправлен ли код, подключён ли номер и знакомо ли устройство, — приложение этого не показывает.
+// Ввод кода (контракт, 2). Экранов два — по полю device из ответа start; от номера они не зависят:
+//  known — с этого браузера номер уже входил, бот сам присылает код: поле кода, нейтральный текст, кнопка
+//          «Войти через Telegram» — запасная («код не пришёл»);
+//  new   — «Новое устройство»: код сам не придёт, главное действие — «Войти через Telegram» (бот попросит номер и
+//          пришлёт код), поле кода — ниже. Сюда же попадает ответ без поля device.
+// Сервер не сообщает, отправлен ли код и подключён ли номер, — приложение этого не показывает.
 // Опрос POST /auth/telegram/poll (раз в poll_interval) говорит только, что вход жив, отклонён или истёк.
 // Токены — только из POST /auth/telegram/confirm. Сам код приложение не знает, не хранит и не пишет в журнал:
 // он живёт в поле ввода и уходит в теле одного запроса.
 const TG_NOTE = `Если номер подключён, код придёт в${NB}Telegram в${NB}течение минуты. Не${NB}пришёл${NB}— нажмите „Войти через Telegram“ или обратитесь к${NB}администратору вашей компании.`;
+// Новое устройство: до нажатия кнопки и после (человек ушёл в Telegram и вернётся с кодом).
+const TG_NEW_NOTE = `Код сам не${NB}придёт: вход с${NB}этого устройства нужно подтвердить в${NB}Telegram. Нажмите „Войти через Telegram“${NB}— бот пришлёт код. При первом входе он попросит „Поделиться номером“.`;
+const TG_NEW_DONE = `В${NB}Telegram нажмите на${NB}код в${NB}сообщении бота${NB}— он скопируется. Вернитесь сюда и${NB}вставьте его.`;
+const TG_TITLE = { known: 'Введите код из&nbsp;Telegram', new: 'Новое устройство' };
 
 function telegramCode(t) {
   const demo = !!t.demoBot;
   const n = t.codeLength;
+  const isNew = t.device !== 'known';
+  const went = isNew && !!t.botOpened; // на новом устройстве кнопку уже нажимали — дальше ждём код
   // Кнопка открывает бота этого входа (bot_url), новый вход не начинает. В демо «бот» — шторка в приложении.
+  // На новом устройстве она главная, пока не нажата; на знакомом — запасная.
+  const openCls = isNew && !went ? 'btn-primary' : 'btn-ghost-dark';
+  const openLabel = went ? 'Открыть Telegram ещё раз' : 'Войти через Telegram';
   const open = demo
-    ? `<button class="btn btn-ghost-dark btn-block" type="button" data-act="tg-demo-bot" data-tg-open>${I.tg}Войти через Telegram</button>`
-    : `<a class="btn btn-ghost-dark btn-block" href="${H(t.botUrl)}" target="_blank" rel="noopener noreferrer" data-tg-open>${I.tg}Войти через Telegram</a>`;
+    ? `<button class="btn ${openCls} btn-block" type="button" data-act="tg-demo-bot" data-tg-open>${I.tg}<span>${openLabel}</span></button>`
+    : `<a class="btn ${openCls} btn-block" href="${H(t.botUrl)}" target="_blank" rel="noopener noreferrer" data-tg-open>${I.tg}<span>${openLabel}</span></a>`;
+  const help = `<div class="tg-help${isNew ? ' main' : ''}${went ? ' went' : ''}" data-tg-help>
+        <p class="tg-note" data-tg-note>${isNew ? (went ? TG_NEW_DONE : TG_NEW_NOTE) : TG_NOTE}</p>
+        ${open}
+      </div>`;
   const life = minutesText(t.expiresIn);
   const shown = t.phone ? phoneMask(phoneDigits(t.phone)) : '';
   return {
     key: 'telegram', depth: 1, theme: 'dark', title: 'Код из Telegram',
     html: `<header class="topbar topbar-dark"><button class="tb-btn" data-back="#/login" aria-label="Назад">${I.chevL}</button><div class="tb-title"></div><div class="tb-right"></div></header>
-    <div class="scroll login tg-screen">
-      <h1 class="login-title sm">Введите код из&nbsp;Telegram</h1>
+    <div class="scroll login tg-screen" data-tg-device="${isNew ? 'new' : 'known'}">
+      <h1 class="login-title sm" data-tg-title>${went ? TG_TITLE.known : TG_TITLE[isNew ? 'new' : 'known']}</h1>
       <p class="login-sub tg-sub">${shown ? `<span data-tg-phone>${H(shown)}</span> · ` : ''}<button class="link-btn on-dark" type="button" data-back="#/login" data-tg-change>Изменить номер</button></p>
+      ${isNew ? `${help}<p class="tg-label">Код из${NB}Telegram</p>` : ''}
       <div class="tg-field" data-tg-field style="--n:${n}">
         <div class="tg-cells" aria-hidden="true">${'<i></i>'.repeat(n)}</div>
         <input class="tg-input" data-tg-input type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="one-time-code" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="done" aria-label="Код из Telegram, ${n} ${plural(n, ['цифра', 'цифры', 'цифр'])}">
@@ -443,10 +461,7 @@ function telegramCode(t) {
       <div class="tg-actions" data-tg-actions>
         <button class="btn btn-primary btn-block" type="button" data-tg-submit disabled>Войти</button>
       </div>
-      <div class="tg-help" data-tg-help>
-        <p class="tg-note" data-tg-note>${TG_NOTE}</p>
-        ${open}
-      </div>
+      ${isNew ? '' : help}
       <p class="tg-warn">${I.shield}<span>Никому не называйте этот код. Он нужен только для входа на${NB}этом экране.</span></p>
     </div>`,
     mount(el) {
@@ -528,6 +543,21 @@ function telegramCode(t) {
       input.addEventListener('focus', () => field.classList.add('focus'));
       input.addEventListener('blur', () => field.classList.remove('focus'));
       submit.addEventListener('click', () => send());
+      // Новое устройство: кнопку нажали — человек уходит в Telegram. Когда вернётся, экран уже про ввод кода:
+      // кнопка становится запасной («Открыть Telegram ещё раз»), текст — что делать с кодом.
+      const openBtn = q('[data-tg-open]');
+      if (isNew && openBtn) {
+        openBtn.addEventListener('click', () => {
+          if (t.botOpened || done) return;
+          t.botOpened = true;
+          openBtn.classList.remove('btn-primary');
+          openBtn.classList.add('btn-ghost-dark');
+          openBtn.querySelector('span').textContent = 'Открыть Telegram ещё раз';
+          q('[data-tg-note]').innerHTML = TG_NEW_DONE;
+          q('[data-tg-title]').innerHTML = TG_TITLE.known;
+          q('[data-tg-help]').classList.add('went');
+        });
+      }
       // «Вставить код»: в Telegram код копируется нажатием, здесь — одно нажатие вместо долгого. Браузер может
       // спросить разрешение на чтение буфера; нет такой возможности — кнопки нет, вставка в поле работает как обычно.
       if (!demo && !(navigator.clipboard && navigator.clipboard.readText)) paste.hidden = true;

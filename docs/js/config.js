@@ -12,8 +12,9 @@ export const CONFIG = {
   env: 'prod',
 
   // Версия приложения — уходит в X-App-Version; сервер сравнивает её с min_app_version (GET /version).
-  // 1.1.0 — вход по одноразовому коду из Telegram (POST /auth/telegram/confirm).
-  appVersion: '1.1.0',
+  // 1.1.0 — вход по номеру телефона и одноразовому коду из Telegram (POST /auth/telegram/confirm).
+  // 1.1.1 — экран «Новое устройство» (поле device в ответе start). Серверу достаточно min_app_version 1.1.0.
+  appVersion: '1.1.1',
 
   // Режим по умолчанию: 'server' — настоящий вход и данные из 1С; 'demo' — выдуманные данные из data/demo.json.
   // Демо всегда доступно ссылкой «Посмотреть демо» на экране входа и адресом #/demo.

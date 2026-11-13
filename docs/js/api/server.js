@@ -210,6 +210,9 @@ export async function startLogin(phone) {
     codeLength: Math.max(0, Math.min(12, Math.trunc(Number(r.code_length)) || 0)),
     expiresIn: Number(r.expires_in) || 300,
     pollInterval: Math.max(1, Number(r.poll_interval) || 2),
+    // known — с этого браузера номер уже входил, бот пришлёт код сам; всё остальное (new, нет поля, незнакомое
+    // значение) — «новое устройство»: код сам не придёт. О самом номере поле ничего не говорит.
+    device: r.device === 'known' ? 'known' : 'new',
   };
   // ВРЕМЕННО, переходный период: сервер прежней схемы номер из запроса не читает и отвечает match_code (число для
   // выбора в боте) без code_length. Тогда экран показывает число и ждёт токены от опроса. Убрать вместе с

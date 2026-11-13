@@ -22,14 +22,16 @@ export function session_() {
   return S.state.auth.logged ? { token: 'demo', expiresAt: null, user: userDto() } : null;
 }
 
-// Вход через Telegram — имитация сценария контракта (2): «бот» (шторка в приложении) присылает одноразовый код тем же
-// текстом, что настоящий, пользователь вводит его на экране входа. Неверный код — code_invalid с числом оставшихся
-// попыток, пятый — challenge_rejected (wrong_code), три таких входа подряд — blocked на 15 минут.
-// Состояние — в памяти: перезагрузка страницы сбрасывает блокировку демо. Код нигде не сохраняется.
+// Вход — имитация сценария контракта (2): номер в приложении, код от «бота» (шторка в приложении) тем же текстом,
+// что у настоящего. Первый вход — через бота («Поделиться номером»); после удачного входа устройство «знакомо»,
+// и на следующих входах бот присылает код сам. Неверный код — code_invalid с числом оставшихся попыток, пятый —
+// challenge_rejected (wrong_code), три таких входа подряд — blocked на 15 минут.
+// Состояние — в памяти: перезагрузка страницы сбрасывает и блокировку, и «знакомое устройство». Номер и код нигде
+// не сохраняются.
 const CODE_LENGTH = 6;
 const CODE_TTL = 300; // секунд — как на сервере
 const TRIES = 5;
-const tg = { ch: null, rejected: 0, blockedUntil: 0, shared: false };
+const tg = { ch: null, rejected: 0, blockedUntil: 0, shared: false, device: false };
 
 function newCode() {
   let c = '';
@@ -37,21 +39,33 @@ function newCode() {
   return c;
 }
 
-export async function startLogin() {
-  await wait(350);
-  tg.ch = { id: `demo_${Date.now()}`, code: newCode(), sentAt: 0, opens: 0, triesLeft: TRIES, until: Date.now() + CODE_TTL * 1000 };
-  return { challengeId: tg.ch.id, botUrl: null, codeLength: CODE_LENGTH, expiresIn: CODE_TTL, pollInterval: 2, demoBot: true };
-}
+const loginError = (status, code, message, details = {}, retry = 0) => new ApiError(code, message, { ...details, contractCode: code }, status, retry);
+
+// Номер демо-пользователя — им заполнено поле на экране входа; подойдёт и любой другой.
+export const demoPhone = () => (S.data ? S.data.user.phone : '');
 
 const sendCode = (ch) => {
   ch.sentAt = Date.now();
   ch.until = ch.sentAt + CODE_TTL * 1000; // код живёт 5 минут с момента, когда бот его прислал
 };
 
-// Что показывает «бот», когда его открыли по ссылке входа:
+export async function startLogin(phone) {
+  await wait(350);
+  let d = String(phone || '').replace(/\D/g, '');
+  if (d.length === 11 && d[0] === '8') d = `7${d.slice(1)}`;
+  if (d.length !== 11) throw loginError(422, 'validation_error', 'Проверьте номер телефона.', { fields: { phone: 'Не номер' } });
+  const ch = { id: `demo_${Date.now()}`, code: newCode(), phone: `+${d}`, sentAt: 0, opens: 0, triesLeft: TRIES, until: Date.now() + CODE_TTL * 1000, auto: tg.device && tg.shared };
+  tg.ch = ch;
+  // Знакомое устройство: бот сам пишет в чат через пару секунд после начала входа.
+  if (ch.auto) setTimeout(() => tg.ch === ch && !ch.sentAt && sendCode(ch), 1200);
+  // Ответ одинаков для любого номера; demoAuto — только для демо: когда показать «уведомление Telegram».
+  return { challengeId: ch.id, botUrl: null, codeLength: CODE_LENGTH, expiresIn: CODE_TTL, pollInterval: 2, demoBot: true, demoAuto: ch.auto };
+}
+
+// Что показывает «бот», когда его открыли по кнопке «Войти через Telegram» (или пришло его сообщение):
 //  contact — первый вход с этого аккаунта: просит «Поделиться номером»;
-//  code    — прислал код (текст сообщения — как у настоящего бота);
-//  again   — ссылку открыли ещё раз: код не повторяется, «он выше в этом чате»;
+//  code    — прислал код (текст сообщения — как у настоящего бота); auto — прислал сам, устройство знакомо;
+//  again   — бота открыли ещё раз: код не повторяется, «он выше в этом чате»;
 //  blocked — слишком много попыток; none — входа нет.
 export function demoBotOpen() {
   const ch = tg.ch;
@@ -60,16 +74,15 @@ export function demoBotOpen() {
   if (!tg.shared) return { step: 'contact' };
   ch.opens++;
   if (!ch.sentAt) sendCode(ch);
-  return { step: ch.opens > 1 ? 'again' : 'code', code: ch.code, site: 'finpulse.smartsol.pro', minutes: CODE_TTL / 60 };
+  return { step: ch.opens > 1 ? 'again' : 'code', auto: ch.auto && ch.opens === 1, code: ch.code, site: 'finpulse.smartsol.pro', minutes: CODE_TTL / 60 };
 }
 
 // «Поделиться номером» в боте — дальше бот этого аккаунта номер не спрашивает (до перезагрузки страницы).
 export function demoBotShare() {
   tg.shared = true;
-  return { ...demoBotOpen(), phone: S.data.user.phone };
+  return { ...demoBotOpen(), phone: tg.ch ? tg.ch.phone : '' };
 }
 
-const loginError = (status, code, message, details = {}, retry = 0) => new ApiError(code, message, { ...details, contractCode: code }, status, retry);
 const rejected = (reason, message, retry) => loginError(409, 'challenge_rejected', message, { reason, ...(retry ? { retry_after: retry } : {}) }, retry || 0);
 const blockedError = () => {
   const left = Math.ceil((tg.blockedUntil - Date.now()) / 1000);
@@ -87,10 +100,11 @@ function challenge(challengeId) {
   return ch;
 }
 
+// Опрос: вход жив. О том, отправлен ли код, не сообщает — как настоящий сервер.
 export async function pollLogin(challengeId) {
   await wait(150);
-  const ch = challenge(challengeId);
-  return ch.sentAt ? { status: 'code_sent', expiresIn: Math.max(0, Math.ceil((ch.until - Date.now()) / 1000)) } : { status: 'pending' };
+  challenge(challengeId);
+  return { status: 'pending' };
 }
 
 export async function confirmLogin(challengeId, code) {
@@ -115,7 +129,8 @@ export async function confirmLogin(challengeId, code) {
   }
   tg.ch = null;
   tg.rejected = 0;
-  S.login(S.data.user.phone);
+  tg.device = true; // «метка устройства»: в следующий раз бот пришлёт код сам
+  S.login(S.data.user.phone); // в сохраняемое состояние демо идёт номер демо-пользователя, не введённый
   return { status: 'ok', session: session_() };
 }
 
@@ -127,6 +142,7 @@ export async function logout() {
 // В демо одно «устройство» — выход везде равен обычному выходу.
 export async function logoutAll() {
   await wait(400);
+  tg.device = false; // метка устройства удаляется: следующий вход снова через бота
   await logout();
 }
 

@@ -103,15 +103,17 @@ async function runFlow(browser, name, opts, isPhone) {
 
   // --- вход ---
   ok(await page.locator('.login-foot').innerText().then(norm) === 'SmartSol × FINTAX CONSULT', 'на входе подпись SmartSol × FINTAX CONSULT');
-  ok((await page.locator('[data-act="tg-start"]').innerText().then(norm)).includes('Войти через Telegram'), 'кнопка «Войти через Telegram»');
-  ok(await page.locator('#phone').count() === 0, 'поля номера телефона нет');
+  ok((await page.locator('[data-act="tg-start"]').innerText().then(norm)).includes('Получить код'), 'кнопка «Получить код»');
+  ok(await page.locator('#login-phone').count() === 1 && (await page.locator('#login-phone').inputValue()) === '', 'поле номера телефона, пустое');
   await noHScroll(page, 'Вход');
   if (isPhone) await shot(page, '01-vhod');
   ok(await page.locator('[data-act="mode-demo"]').isVisible(), 'по умолчанию — настоящий вход, есть «Посмотреть демо»');
   await page.locator('[data-act="mode-demo"]').click();
   await settle(page, 700);
   ok((await page.locator('.login-hint').innerText().then(norm)).includes('Демо'), 'включён демо-режим');
-  // вход по коду: «бот» просит номер (первый вход), присылает код тем же текстом, что настоящий
+  ok((await page.locator('#login-phone').inputValue()) === '+7 701 555 12 34', 'демо: в поле — номер демо-пользователя');
+  if (isPhone) await shot(page, '01b-vhod-demo-nomer');
+  // вход: номер → экран кода (один для всех) → «Войти через Telegram» → «бот» просит номер и присылает код
   await tap(page, '[data-act="tg-start"]');
   await settle(page, 1300);
   ok((await screenKey(page)) === '#/telegram', 'экран «Введите код из Telegram»');
@@ -119,8 +121,17 @@ async function runFlow(browser, name, opts, isPhone) {
   ok(await page.locator('.screen:not(.leaving) [data-tg-code]').count() === 0, 'числа для выбора больше нет');
   const field = page.locator('.screen:not(.leaving) [data-tg-input]');
   ok(await page.locator('.screen:not(.leaving) .tg-cells i').count() === 6 && (await field.getAttribute('autocomplete')) === 'one-time-code' && (await field.getAttribute('inputmode')) === 'numeric', 'поле кода: 6 цифр, цифровая клавиатура, one-time-code');
-  ok((await page.locator('.sheet-wrap .tgbot').innerText().then(norm)).includes('Нажмите «Поделиться номером»'), 'демо-бот, первый вход: просит «Поделиться номером»');
-  if (isPhone) await shot(page, '02a-demo-bot-nomer');
+  ok((await page.locator('.screen:not(.leaving) [data-tg-note]').innerText().then(norm)) === 'Если номер подключён, код придёт в Telegram в течение минуты. Не пришёл — нажмите „Войти через Telegram“ или обратитесь к администратору вашей компании.', 'нейтральный текст — дословно');
+  ok((await page.locator('.screen:not(.leaving) [data-tg-status]').innerText().then(norm)) === 'Код действует 5 минут', 'подсказка «Код действует 5 минут», без таймера');
+  ok((await page.locator('.screen:not(.leaving) [data-tg-phone]').innerText().then(norm)) === '+7 701 555 12 34', 'на экране кода — введённый номер');
+  await settle(page, 1800);
+  ok(await page.locator('.sheet-wrap').count() === 0, 'первый вход с устройства: бот сам не открывается и код сам не приходит');
+  await noHScroll(page, 'Ввод кода');
+  if (isPhone) await shot(page, '02a-vvedite-kod');
+  await tap(page, '[data-tg-open]');
+  await settle(page, 500);
+  ok((await page.locator('.sheet-wrap .tgbot').innerText().then(norm)).includes('Нажмите «Поделиться номером»'), '«Войти через Telegram» → демо-бот просит «Поделиться номером»');
+  if (isPhone) await shot(page, '02b-demo-bot-nomer');
   await page.locator('.sheet-wrap [data-act="tg-demo-share"]').click();
   await page.waitForSelector('.sheet-wrap .tgbot-code', { timeout: 6000 });
   await settle(page, 400);
@@ -128,12 +139,10 @@ async function runFlow(browser, name, opts, isPhone) {
   const code1 = (await page.locator('.sheet-wrap .tgbot-code').innerText()).trim();
   ok(/^\d{6}$/.test(code1), 'демо-бот прислал код из 6 цифр');
   ok(botMsg.replace(/\s+/g, ' ') === `Код для входа в ФинПульс: ${code1} Действует 5 минут. Вводите только на finpulse.smartsol.pro. Никому не называйте этот код. Если вход начали не вы — просто проигнорируйте сообщение.`, 'текст сообщения бота — как у настоящего');
-  if (isPhone) await shot(page, '02b-demo-bot-kod');
+  ok((await page.locator('.sheet-wrap .tgbot-msg.mine').innerText().then(norm)).includes('+7 701 555 12 34'), 'боту ушёл номер, введённый в приложении');
+  if (isPhone) await shot(page, '02c-demo-bot-kod');
   await tap(page, '[data-act="sheet-close"].btn');
   await settle(page, 450);
-  await page.waitForFunction(() => !!document.querySelector('.screen:not(.leaving) [data-tg-status][data-state="sent"]'), null, { timeout: 6000 });
-  ok(await page.locator('.screen:not(.leaving) [data-tg-left]').innerText().then((t) => /^[45]:\d\d$/.test(t.trim())), 'таймер срока кода (5 минут)');
-  if (isPhone) await shot(page, '02c-vvedite-kod');
   // неверный код → «Осталось попыток: 4», поле очищено
   const wrong = code1 === '000000' ? '111111' : '000000';
   await field.fill(wrong);
@@ -142,8 +151,8 @@ async function runFlow(browser, name, opts, isPhone) {
   ok((await field.inputValue()) === '', 'поле кода очищено');
   await settle(page, 300);
   if (isPhone) await shot(page, '02d-nevernyy-kod');
-  // «Открыть Telegram ещё раз» → код не повторяется; нажатие на код копирует его → «Вставить код» → вход
-  await tap(page, '[data-act="tg-demo-bot"]');
+  // «Войти через Telegram» ещё раз → код не повторяется; нажатие на код копирует его → «Вставить код» → вход
+  await tap(page, '[data-tg-open]');
   await settle(page, 500);
   ok((await page.locator('.sheet-wrap .tgbot').innerText().then(norm)).includes('Код уже отправлен — он выше в этом чате'), 'бот открыт ещё раз: «Код уже отправлен — он выше в этом чате»');
   await page.locator('.sheet-wrap .tgbot-code').click();
@@ -441,6 +450,30 @@ async function runFlow(browser, name, opts, isPhone) {
   await tap(page, '[data-act="logout"]');
   await settle(page);
   ok((await screenKey(page)) === '#/login' && (await page.locator('[data-act="mode-demo"]').count()) === 1, '«Выйти из демо» возвращает к настоящему входу');
+  ok((await page.locator('#login-phone').inputValue()) === '', 'после выхода поле номера пустое');
+
+  // --- знакомое устройство: при следующем входе бот присылает код сам ---
+  await page.locator('[data-act="mode-demo"]').click();
+  await settle(page, 700);
+  await tap(page, '[data-act="tg-start"]');
+  await page.waitForSelector('.sheet-wrap .tgbot-code', { timeout: 8000 });
+  await settle(page, 500);
+  const autoTxt = await page.locator('.sheet-wrap').innerText().then(norm);
+  ok(autoTxt.includes('Код для входа в ФинПульс:') && !autoTxt.includes('Поделиться номером') && autoTxt.includes('бот присылает код сам'), 'знакомое устройство: бот прислал код сам, без «Поделиться номером»');
+  if (isPhone) await shot(page, '02e-kod-prishel-sam');
+  await page.locator('.sheet-wrap .tgbot-code').click();
+  await page.waitForFunction(() => !document.querySelector('.sheet-wrap'), null, { timeout: 6000 });
+  await tap(page, '[data-tg-paste]');
+  await page.waitForFunction(() => location.hash === '#/orgs', null, { timeout: 8000 });
+  await settle(page, 700);
+  ok((await screenKey(page)) === '#/orgs', 'код вставлен → вход выполнен');
+  await tap(page, '[data-act="pick-org"][data-id="alfa"]');
+  await settle(page, 600);
+  await page.goto(BASE + '#/profile');
+  await settle(page);
+  await tap(page, '[data-act="logout"]');
+  await settle(page);
+  ok((await screenKey(page)) === '#/login', 'снова вышли из демо');
 
   // без localStorage (приватный режим) — не падает
   await ctx.addInitScript(() => {

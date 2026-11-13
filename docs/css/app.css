@@ -961,12 +961,39 @@ html.framed .loadbar { top: 50px; left: 24px; right: 24px; }
 .tg-input:focus, .tg-input:focus-visible { outline: none; } /* фокус показывает активная ячейка */
 .tg-input::selection { background: transparent; }
 .tg-input:disabled { pointer-events: none; }
-.tg-under { display: flex; justify-content: flex-end; min-height: 34px; margin-top: 4px; }
+.tg-under { display: flex; justify-content: space-between; align-items: center; gap: 12px; min-height: 34px; margin-top: 6px; }
+.tg-under .link-btn { margin-left: auto; }
+/* «Код действует 5 минут» — подсказка без таймера: когда бот отправил код, приложение не знает */
+.tg-life { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: rgba(244, 241, 234, 0.6); }
+.tg-life[hidden] { display: none; }
+.tg-life .ic { width: 15px; height: 15px; }
+.tg-life.ok { color: var(--mint); font-weight: 600; }
+/* нейтральный текст и кнопка «Войти через Telegram» — вместе, одним блоком */
+.tg-help { margin-top: 22px; padding: 14px; border-radius: 20px; background: rgba(255, 255, 255, 0.04); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08); }
+.tg-help[hidden] { display: none; }
+.tg-help .tg-note { margin: 0 2px 12px; font-size: 13.5px; color: rgba(244, 241, 234, 0.7); }
+.tg-help .btn .ic { width: 20px; height: 20px; }
+.tg-sub .link-btn { display: inline; height: auto; padding: 0; font-size: inherit; }
+.tg-sub [data-tg-phone] { color: var(--milk); font-weight: 600; white-space: nowrap; font-variant-numeric: tabular-nums; }
+/* номер телефона на экране входа */
+.phone-label { margin-bottom: 7px; font-size: 12.5px; font-weight: 500; color: rgba(244, 241, 234, 0.55); }
+.phone-input {
+  width: 100%; height: 56px; padding: 0 16px; border: 0; border-radius: 17px; outline: none; background: rgba(255, 255, 255, 0.06);
+  box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, 0.14); color: var(--milk); font: 600 20px/1 var(--f-head); letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums; -webkit-appearance: none; appearance: none; transition: box-shadow 0.15s;
+}
+.phone-input:focus, .phone-input:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--milk); }
+.phone-input.invalid, .phone-input.invalid:focus { box-shadow: inset 0 0 0 1.5px var(--coral); }
+.phone-input::placeholder { color: rgba(244, 241, 234, 0.28); font-weight: 500; }
+/* невысокий экран (телефон в браузере): картинка ниже, чтобы номер и кнопка были видны без прокрутки */
+@media (max-height: 740px) {
+  .login-visual { height: 168px; }
+  .login-visual .fc-3 { display: none; }
+  .login-visual .login-pulse { top: 44px; }
+}
 .link-btn.on-dark { height: 34px; padding: 0 2px; color: rgba(244, 241, 234, 0.72); text-decoration: underline; text-underline-offset: 3px; }
 .link-btn.on-dark[hidden] { display: none; }
 .tg-screen #tg-code-err { margin: 0 0 12px; }
-.tg-status.sent { color: var(--milk); }
-.tg-status.sent .spin { display: none; } /* код уже у пользователя — ждать нечего, идёт только срок */
 .tg-note { margin-top: 14px; font-size: 12.5px; line-height: 1.45; color: rgba(244, 241, 234, 0.45); }
 .tg-note[hidden] { display: none; }
 .tg-note + .tg-warn { padding-top: 16px; }
@@ -995,3 +1022,6 @@ html.framed.env-test #app { --sat: 84px; }
 .env-bar b { padding: 3px 7px; border-radius: 6px; background: #141414; color: #ffd400; }
 .env-bar span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; letter-spacing: 0; }
 .env-bar button { height: 24px; padding: 0 9px; border-radius: 8px; background: rgba(20, 20, 20, 0.12); font: 600 12px/1 var(--f-text); color: #141414; }
+
+/* кнопка-ссылка (открыть бота) — без подчёркивания */
+a.btn { text-decoration: none; }

@@ -196,31 +196,33 @@ export function session_() {
   return s ? { token: access && access.token, user: userDto(s.user) } : null;
 }
 
-// Вход через Telegram-бота (2.1): ссылка на бота и длина кода. Тело пустое — {}.
+// Начать вход (2.1): номер телефона → ссылка на бота и длина кода. Ответ одинаков для любого номера: подключён ли он
+// и знакомо ли устройство, по нему узнать нельзя. Запрос идёт с cookie (как все /auth/*): по метке fp_device сервер
+// узнаёт знакомое устройство и тогда бот присылает код сам. Номер уходит только в теле этого запроса.
 // Самого кода в ответе нет: его присылает бот, приложение его не знает.
-export async function startLogin() {
-  const res = await send('POST', '/auth/telegram/start', { body: {} });
+export async function startLogin(phone) {
+  const res = await send('POST', '/auth/telegram/start', { body: { phone: String(phone || '') } });
   if (!res.ok) throw await toError(res);
   const r = await res.json();
   const dto = {
     challengeId: r.challenge_id,
-    botUrl: r.bot_url, // имя бота задаёт сервер — ссылку не собираем сами
+    botUrl: r.bot_url, // имя бота задаёт сервер — ссылку не собираем сами; открывается только кнопкой
     codeLength: Math.max(0, Math.min(12, Math.trunc(Number(r.code_length)) || 0)),
     expiresIn: Number(r.expires_in) || 300,
     pollInterval: Math.max(1, Number(r.poll_interval) || 2),
   };
-  // ВРЕМЕННО, переходный период: сервер прежней схемы отвечает match_code (число для выбора в боте) без code_length.
-  // Тогда экран показывает число и ждёт токены от опроса. Убрать вместе с telegramMatch в screens.js, когда на
-  // рабочем сервере заработает вход по коду.
+  // ВРЕМЕННО, переходный период: сервер прежней схемы номер из запроса не читает и отвечает match_code (число для
+  // выбора в боте) без code_length. Тогда экран показывает число и ждёт токены от опроса. Убрать вместе с
+  // telegramMatch в screens.js, когда на рабочем сервере заработает вход по коду.
   if (!dto.codeLength && r.match_code !== undefined && r.match_code !== null) dto.matchCode = String(r.match_code);
   // Ни длины кода, ни числа — показывать нечего: не открываем пустой экран, просим повторить.
   if (!dto.challengeId || (!dto.codeLength && dto.matchCode === undefined)) throw new ApiError('server_error', 'Сервер не сообщил, как подтвердить вход');
   return dto;
 }
 
-// Опрос (2.1.1): токенов не выдаёт. 202 pending — бот ещё не прислал код; 202 code_sent — прислал, expires_in —
-// сколько секунд код ещё действует. Отказы — ApiError: access_revoked, challenge_rejected (details.reason: wrong_code |
-// blocked), challenge_expired, too_many_requests, not_found, upstream_unavailable (503 source_unavailable — вход отменён).
+// Опрос (2.1.1): жив ли вход. Токенов не выдаёт и о том, прислал ли бот код, не сообщает: 202 pending — вход жив.
+// Отказы — ApiError: challenge_rejected (details.reason: wrong_code | blocked), challenge_expired, too_many_requests,
+// not_found, upstream_unavailable (503 source_unavailable — вход отменён).
 export async function pollLogin(challengeId) {
   const res = await send('POST', '/auth/telegram/poll', { body: { challenge_id: challengeId } });
   if (!res.ok) throw await toError(res);
@@ -232,7 +234,6 @@ export async function pollLogin(challengeId) {
   }
   // ВРЕМЕННО, переходный период: сервер прежней схемы на опрос отвечает 200 с токенами (вход подтверждён в боте).
   if (res.status === 200 && r && r.access_token) return signIn(r);
-  if (r && r.status === 'code_sent') return { status: 'code_sent', expiresIn: Number(r.expires_in) || 0 };
   return { status: 'pending' };
 }
 

@@ -40,7 +40,7 @@ export const api = {
   init: () => call('init'),
   // вход
   session: () => impl().session_(),
-  startLogin: () => call('startLogin'),
+  startLogin: (phone) => call('startLogin', phone),
   pollLogin: (challengeId) => call('pollLogin', challengeId),
   confirmLogin: (challengeId, code) => call('confirmLogin', challengeId, code),
   logout: () => call('logout'),
@@ -71,6 +71,7 @@ export const api = {
   deletePushSubscription: (endpoint) => call('deletePushSubscription', endpoint),
   // только демо
   resetDemo: () => call('resetDemo'),
+  demoPhone: () => (isDemo() ? demo.demoPhone() : ''),
   demoBotOpen: () => (isDemo() ? demo.demoBotOpen() : { step: 'none' }),
   demoBotShare: () => (isDemo() ? demo.demoBotShare() : { step: 'none' }),
 };

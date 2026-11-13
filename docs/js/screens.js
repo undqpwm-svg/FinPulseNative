@@ -339,7 +339,7 @@ actions['tg-start'] = async (b) => {
   try {
     const r = await api.startLogin(phone);
     ui.loginPhone = phone;
-    ui.tg = { ...r, phone, startedAt: Date.now(), opened: false };
+    ui.tg = { ...r, phone, startedAt: Date.now() };
     if (location.hash === '#/telegram') nav.rerender();
     else navigate('#/telegram');
   } catch (e) {
@@ -374,15 +374,14 @@ actions['mode-server'] = () => {
   nav.route();
 };
 
-// Экран после «Получить код». Сервер прислал code_length — ввод одноразового кода (контракт, 2);
-// прислал match_code — прежний экран с числом (ВРЕМЕННО, переходный период — см. telegramMatch ниже).
+// Экран после «Получить код»: ввод одноразового кода (контракт, 2).
 views.telegram = async () => {
   const t = ui.tg;
   if (!t) return { redirect: '#/login' };
-  return t.codeLength ? telegramCode(t) : telegramMatch(t);
+  return telegramCode(t);
 };
 
-// Общее для обоих экранов входа: «вход не удался» — текст и «Начать заново» (при блокировке — с таймером).
+// «Вход не удался»: кнопка «Начать заново» (при блокировке — с таймером).
 function tgRestart(el, acts, wait) {
   acts.innerHTML = '<button class="btn btn-primary btn-block" data-act="tg-start" data-restart><span>Начать заново</span></button>';
   if (!(wait > 0)) return;
@@ -670,7 +669,6 @@ function telegramCode(t) {
         // Пока шёл опрос, код ушёл на проверку: после удачного входа опрос ответил бы 410 — такой ответ не слушаем.
         if (confirming) return schedule(every);
         if (failed) return pollFailed(failed);
-        if (r.status === 'ok') return signedIn(); // сервер прежней схемы выдал токены опросом — тоже вход
         schedule(every);
       }
 
@@ -775,130 +773,6 @@ function telegramCode(t) {
         // На компьютере курсор сразу в поле; на телефоне клавиатура без нажатия не откроется — и не нужно.
         setTimeout(() => alive() && codeStep() && !sheetOpen() && input.focus({ preventScroll: true }), 420);
       }
-    },
-  };
-}
-
-// ----------------------------------------------------------------------------------------------------------------
-// ВРЕМЕННО, переходный период. Сервер прежней схемы отвечает на start числом match_code (номер из запроса он не
-// читает): число показываем крупно, пользователь открывает бота кнопкой и выбирает его там, токены приходят из
-// опроса. Нужен, пока на рабочем сервере не включён вход по коду, — чтобы приложение и сервер можно было
-// выкладывать не одновременно. После выкладки сервера удалить:
-// эту функцию, ветки «ВРЕМЕННО» в api/server.js (startLogin, pollLogin) и стиль .tg-code.
-// ----------------------------------------------------------------------------------------------------------------
-function telegramMatch(t) {
-  const open = `<a class="btn ${t.opened ? 'btn-ghost-dark' : 'btn-primary'} btn-block" href="${H(t.botUrl)}" target="_blank" rel="noopener noreferrer" data-tg-open>${I.tg}${t.opened ? 'Открыть Telegram ещё раз' : 'Открыть Telegram'}</a>`;
-  return {
-    key: 'telegram', depth: 1, theme: 'dark', title: 'Вход через Telegram',
-    html: `<header class="topbar topbar-dark"><button class="tb-btn" data-back="#/login" aria-label="Назад">${I.chevL}</button><div class="tb-title"></div><div class="tb-right"></div></header>
-    <div class="scroll login tg-screen">
-      <h1 class="login-title sm">Выберите в&nbsp;Telegram число</h1>
-      <div class="tg-code" data-tg-code aria-label="Число для входа ${H(t.matchCode)}">${H(t.matchCode)}</div>
-      <p class="login-sub tg-sub">Бот SmartSol покажет три числа — нажмите это. При первом входе бот попросит «Поделиться номером».</p>
-      <div class="tg-status" data-tg-status role="status">${spinner}<span data-tg-text>Ждём подтверждения в&nbsp;Telegram</span><b data-tg-left></b></div>
-      <div class="form-err on-dark" id="tg-err" role="alert" hidden></div>
-      <div class="tg-actions" data-tg-actions>${open}</div>
-      <p class="tg-warn">${I.shield}<span>Никому не называйте это число. Если вход начали не${NB}вы — ничего не${NB}нажимайте в${NB}боте.</span></p>
-    </div>`,
-    mount(el) {
-      const status = el.querySelector('[data-tg-status]');
-      const text = el.querySelector('[data-tg-text]');
-      const leftEl = el.querySelector('[data-tg-left]');
-      const err = el.querySelector('#tg-err');
-      const acts = el.querySelector('[data-tg-actions]');
-      const expiresAt = t.startedAt + t.expiresIn * 1000;
-      const every = t.pollInterval * 1000;
-      let timer = null;
-      let inflight = false;
-      let done = false;
-      let last = 0;
-      const alive = () => el.isConnected && !done && ui.tg === t;
-      const drawLeft = () => {
-        const s = Math.ceil((expiresAt - Date.now()) / 1000);
-        leftEl.textContent = s > 0 ? mmss(s) : '';
-        if (s <= 0 && !done) text.textContent = 'Время вышло — проверяем';
-      };
-      const tick = setInterval(() => (el.isConnected && !done ? drawLeft() : clearInterval(tick)), 1000);
-      drawLeft();
-      const schedule = (ms) => {
-        clearTimeout(timer);
-        timer = setTimeout(poll, Math.max(0, ms));
-      };
-      // Вернулись из Telegram — опросить сразу, но не чаще poll_interval.
-      const soon = () => {
-        if (alive() && !inflight && document.visibilityState !== 'hidden') schedule(last + every - Date.now());
-      };
-      const stop = () => {
-        done = true;
-        clearTimeout(timer);
-        clearInterval(tick);
-        document.removeEventListener('visibilitychange', soon);
-        window.removeEventListener('focus', soon);
-      };
-      document.addEventListener('visibilitychange', soon);
-      window.addEventListener('focus', soon);
-
-      const fail = (msg, { wait = 0, kind = '' } = {}) => {
-        stop();
-        el.querySelector('[data-tg-code]').classList.add('off');
-        status.hidden = true;
-        err.hidden = false;
-        err.dataset.kind = kind;
-        err.innerHTML = `${I.alert}<span>${msg}</span>`;
-        tgRestart(el, acts, wait);
-      };
-      const msg = (e, fallback) => H((e && e.message) || fallback);
-
-      function handle(e) {
-        const c = e instanceof ApiError ? e.code : 'server_error';
-        const d = (e && e.details) || {};
-        if (c === 'challenge_rejected' && d.reason === 'blocked') {
-          const sec = Number(d.retry_after) || e.retryAfter || 900;
-          storage.set(TG_BLOCK_KEY, String(Date.now() + sec * 1000));
-          return fail(msg(e, 'Вход через Telegram заблокирован на 15 минут.'), { wait: sec, kind: 'blocked' });
-        }
-        if (c === 'challenge_rejected') return fail(msg(e, 'В Telegram выбрано другое число. Начните вход заново.'), { kind: 'wrong_number' });
-        if (c === 'access_revoked') return fail(msg(e, 'Доступ к приложению выключен. Обратитесь к администратору ФинПульса в своей компании.'), { kind: 'access_revoked' });
-        if (c === 'challenge_expired') return fail('Время входа истекло. Начните заново — появится новое число.', { kind: 'expired' });
-        if (c === 'not_found') return fail('Вход не найден. Начните заново.', { kind: 'expired' });
-        if (c === 'upstream_unavailable') return fail('Нет связи с учётом компании. Вход отменён — начните заново через минуту.', { wait: e.retryAfter || 60, kind: 'source' });
-        if (c === 'app_outdated') return fail('Версия приложения устарела — обновите страницу.', { kind: 'outdated' });
-        if (c === 'maintenance') return fail('Сервер на обслуживании. Повторите чуть позже.', { wait: e.retryAfter || 0, kind: 'maintenance' });
-        if (c === 'too_many_requests') return schedule(Math.max(every, (e.retryAfter || 0) * 1000)); // опрашиваем реже
-        if (c === 'network' || c === 'timeout' || c === 'server_unavailable') {
-          text.textContent = 'Нет связи — пробуем снова';
-          return schedule(Math.max(every, 4000));
-        }
-        return fail('Не получилось, попробуйте позже.', { kind: 'error' });
-      }
-
-      async function poll() {
-        if (!alive() || inflight) return;
-        inflight = true;
-        last = Date.now();
-        let r;
-        try {
-          r = await api.pollLogin(t.challengeId);
-        } catch (e) {
-          inflight = false;
-          if (alive()) handle(e);
-          return;
-        }
-        inflight = false;
-        if (!alive()) return;
-        if (r.status === 'ok') {
-          stop();
-          el.querySelector('[data-tg-code]').classList.add('ok');
-          status.classList.add('ok');
-          status.innerHTML = `${I.check}<span>Вход подтверждён</span>`;
-          tgSignedIn();
-          return;
-        }
-        text.innerHTML = `Ждём подтверждения в${NB}Telegram`;
-        schedule(every);
-      }
-
-      schedule(every);
     },
   };
 }

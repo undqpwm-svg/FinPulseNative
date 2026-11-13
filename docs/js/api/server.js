@@ -214,12 +214,8 @@ export async function startLogin(phone) {
     // значение) — «новое устройство»: код сам не придёт. О самом номере поле ничего не говорит.
     device: r.device === 'known' ? 'known' : 'new',
   };
-  // ВРЕМЕННО, переходный период: сервер прежней схемы номер из запроса не читает и отвечает match_code (число для
-  // выбора в боте) без code_length. Тогда экран показывает число и ждёт токены от опроса. Убрать вместе с
-  // telegramMatch в screens.js, когда на рабочем сервере заработает вход по коду.
-  if (!dto.codeLength && r.match_code !== undefined && r.match_code !== null) dto.matchCode = String(r.match_code);
-  // Ни длины кода, ни числа — показывать нечего: не открываем пустой экран, просим повторить.
-  if (!dto.challengeId || (!dto.codeLength && dto.matchCode === undefined)) throw new ApiError('server_error', 'Сервер не сообщил, как подтвердить вход');
+  // Без длины кода показывать нечего (так отвечал сервер прежней схемы входа): пустой экран не открываем.
+  if (!dto.challengeId || !dto.codeLength) throw new ApiError('server_error', 'Сервер не сообщил, как подтвердить вход');
   return dto;
 }
 
@@ -229,14 +225,6 @@ export async function startLogin(phone) {
 export async function pollLogin(challengeId) {
   const res = await send('POST', '/auth/telegram/poll', { body: { challenge_id: challengeId } });
   if (!res.ok) throw await toError(res);
-  let r = null;
-  try {
-    r = await res.json();
-  } catch (e) {
-    r = null;
-  }
-  // ВРЕМЕННО, переходный период: сервер прежней схемы на опрос отвечает 200 с токенами (вход подтверждён в боте).
-  if (res.status === 200 && r && r.access_token) return signIn(r);
   return { status: 'pending' };
 }
 

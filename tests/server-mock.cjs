@@ -3,7 +3,7 @@
 // Сценарии: версия API и заголовки; вход — номер в приложении, код из Telegram (start с номером → экран кода с
 // нейтральным текстом и кнопкой бота → poll: 202 pending, отказы → confirm: 200, code_invalid, code_not_sent,
 // challenge_rejected wrong_code/blocked, challenge_expired, too_many_requests, source_unavailable, обрыв связи);
-// переходный период — старый ответ start с match_code; тестовый сервер (?api=test); залпы одинаковых запросов;
+// ответ сервера прежней схемы (match_code) — понятная ошибка; тестовый сервер (?api=test); залпы одинаковых запросов;
 // заявка с двумя статьями;
 // выбор организации (несколько, partial, 503 source_unavailable, одна); обновление токенов
 // (одно на все запросы, refresh_invalid, access_revoked); «1С недоступна»; решения (успех, already_decided,
@@ -135,12 +135,12 @@ function summary() {
 // ---------- поддельный сервер ----------
 async function mockApi(page, ctl) {
   ctl.calls = [];
-  // legacy: true — сервер прежней схемы входа (match_code, токены из опроса); code — код, который «прислал бот»;
+  // code — код, который «прислал бот»;
   // known: true — знакомое устройство (device: known): бот присылает код сам сразу после start (sent); false —
   // новое (device: new): код появится, когда тест выставит sent (человек открыл бота). noDevice: true — сервер
   // без поля device в ответе start. queue / confirmQueue — исходы очередных опросов и вводов кода;
   // delay — задержка ответов на GET, мс (медленная 1С).
-  ctl.state = { cookie: false, access: 'at_1', decided: false, orgs: [ORG], partial: false, queue: [], confirmQueue: [], starts: 0, legacy: false, known: true, code: '483921', sent: false, tries: 5, delay: 0, settings: { requests: true, summary: true, payments: true, gaps: true, whatsapp: false }, ...ctl.state };
+  ctl.state = { cookie: false, access: 'at_1', decided: false, orgs: [ORG], partial: false, queue: [], confirmQueue: [], starts: 0, known: true, code: '483921', sent: false, tries: 5, delay: 0, settings: { requests: true, summary: true, payments: true, gaps: true, whatsapp: false }, ...ctl.state };
   await page.route(/^https:\/\/api(-test)?\.smartsol\.pro\/api\/v1\//, async (route) => {
     const req = route.request();
     const url = new URL(req.url());
@@ -181,18 +181,14 @@ async function mockApi(page, ctl) {
     if (p === '/auth/telegram/start') {
       if (st.startLimited) return err(429, 'too_many_requests', 'Слишком много входов с этого адреса', { retry_after: 600 }, { 'Retry-After': '600' });
       // новая схема: в теле — номер; пробелы, скобки и дефисы сервер убирает, «8 701…» понимает как +7. Не номер — 422.
-      // Ответ 200 одинаков для любого номера. Сервер прежней схемы тело не читает.
-      if (!st.legacy) {
-        let d = String((body && body.phone) || '').replace(/\D/g, '');
-        if (d.length === 11 && d[0] === '8') d = `7${d.slice(1)}`;
-        if (d.length !== 11) return err(422, 'validation_error', 'Проверьте поля запроса.', { fields: { phone: 'Не номер' } });
-      }
+      // Ответ 200 одинаков для любого номера.
+      let d = String((body && body.phone) || '').replace(/\D/g, '');
+      if (d.length === 11 && d[0] === '8') d = `7${d.slice(1)}`;
+      if (d.length !== 11) return err(422, 'validation_error', 'Проверьте поля запроса.', { fields: { phone: 'Не номер' } });
       st.starts++;
       st.challenge = `ch_${st.starts}`;
-      st.sent = !st.legacy && !!st.known; // знакомое устройство: бот прислал код сам
+      st.sent = !!st.known; // знакомое устройство: бот прислал код сам
       st.tries = 5;
-      // сервер прежней схемы: число для выбора в боте, поля code_length нет
-      if (st.legacy) return json(200, { challenge_id: st.challenge, bot_url: `${BOT}?start=n_${st.starts}`, match_code: st.starts === 1 ? '47' : '05', expires_in: 300, poll_interval: 1 });
       return json(200, { challenge_id: st.challenge, bot_url: `${BOT}?start=n_${st.starts}`, code_length: 6, expires_in: 300, poll_interval: 1, ...(st.noDevice ? {} : { device: st.known ? 'known' : 'new' }) });
     }
     if (p === '/auth/telegram/poll') {
@@ -204,17 +200,10 @@ async function mockApi(page, ctl) {
       if (o === 'blocked') return blocked();
       if (o === 'expired') return expired();
       if (o === 'source') return sourceDown();
-      if (st.legacy) {
-        if (o === 'revoked') return err(403, 'access_revoked', 'Этот номер не подключён к ФинПульсу. Обратитесь к администратору компании', { reason: 'not_connected' });
-        if (o === 'wrong') return err(409, 'challenge_rejected', 'В Telegram выбрано другое число. Начните вход заново.', { reason: 'wrong_number' });
-        if (o === 'ok') return tokens(); // прежняя схема: токены выдаёт опрос
-        return json(202, { status: 'pending' });
-      }
-      // новая схема: опрос токенов не выдаёт и о том, отправлен ли код, не сообщает — всегда 202 pending
+      // опрос токенов не выдаёт и о том, отправлен ли код, не сообщает — всегда 202 pending
       return json(202, { status: 'pending' });
     }
     if (p === '/auth/telegram/confirm') {
-      if (st.legacy) return err(404, 'not_found', 'Не найдено'); // на сервере прежней схемы такого метода нет
       if (!body || body.challenge_id !== st.challenge) return err(404, 'not_found', 'Вход не найден');
       const o = st.confirmQueue.length ? st.confirmQueue.shift() : '';
       if (o === 'abort') return route.abort('failed');
@@ -671,36 +660,20 @@ const PUSH_STUB = () => {
       await ctx.close();
     }
 
-    // ---------- 1а. переходный период: сервер прежней схемы ----------
-    console.log('\n▶ Переходный период: сервер отвечает по-старому (match_code) — прежний экран с числом');
+    // ---------- 1а. ответ сервера прежней схемы входа ----------
+    console.log('\n▶ Сервер ответил по-старому (match_code, без code_length) — понятная ошибка, экрана с числом нет');
     {
-      const { ctx, page, errors, ctl } = await newCtx(devices['iPhone 13'], { legacy: true });
-      const st = ctl.state;
+      const { ctx, page, errors, ctl } = await newCtx(devices['iPhone 13']);
+      ctl.override = (call, { json }) => (call.path === '/auth/telegram/start'
+        ? (json(200, { challenge_id: 'ch_old', bot_url: `${BOT}?start=n_old`, match_code: '47', expires_in: 300, poll_interval: 1 }), true) : false);
       await page.goto(BASE);
-      await settle(page, 900);
+      await settle(page, 800);
       await page.locator('#login-phone').fill('7015551234');
       await page.locator('[data-act="tg-start"]').click();
-      await page.waitForFunction(() => location.hash === '#/telegram');
       await settle(page, 900);
-      ok(ctl.calls.find((c) => c.path === '/auth/telegram/start').body.phone === '+77015551234', 'номер уходит в start и на старый сервер (он его не читает)');
-      ok((await page.locator('[data-tg-code]').innerText()).trim() === '47', 'match_code крупно: «47»');
-      ok(norm(await page.locator('.login-title').innerText()).includes('Выберите в Telegram число') && (await page.locator('[data-tg-input]').count()) === 0, '«Выберите в Telegram число», поля кода нет');
-      const openOld = page.locator('[data-tg-open]');
-      ok(ctl.popups.length === 0 && (await openOld.getAttribute('href')) === `${BOT}?start=n_1` && norm(await openOld.innerText()).includes('Открыть Telegram'), 'бот открывается кнопкой «Открыть Telegram» по bot_url');
-      ok(norm(await page.locator('[data-tg-status]').innerText()).includes('Ждём подтверждения'), 'статус «Ждём подтверждения в Telegram»');
-      await shot(page, '10-staraya-shema-chislo');
-      await settle(page, 1300);
-      ok((await page.locator('#tg-err').isHidden()) && (await page.evaluate(() => location.hash)) === '#/telegram', '202 — ждём дальше');
-      st.queue = ['wrong'];
-      await page.waitForSelector('.screen:not(.leaving) #tg-err:not([hidden])', { timeout: 8000 });
-      ok(norm(await page.locator('.screen:not(.leaving) #tg-err').innerText()).includes('В Telegram выбрано другое число. Начните вход заново.'), '409 challenge_rejected wrong_number — текст message, «Начать заново»');
-      st.queue = ['pending', 'ok'];
-      await page.locator('[data-restart]').click();
-      await page.waitForFunction(() => location.hash === '#/home', null, { timeout: 12000 });
-      await settle(page, 700);
-      ok(st.starts === 2 && st.cookie, 'новый вход: опрос ответил 200 с токенами → вход выполнен');
-      ok(!ctl.calls.some((c) => c.path === '/auth/telegram/confirm'), 'по старой схеме confirm не вызывается');
-      ok(norm(await page.locator('.hero').innerText()).includes('5 000 000'), 'главная открылась');
+      ok((await page.evaluate(() => location.hash)) === '#/login' && norm(await page.locator('#login-err').innerText()).includes('Не удалось начать вход. Повторите через минуту'), 'старый ответ start — «Не удалось начать вход», остаёмся на экране входа');
+      ok((await page.locator('[data-tg-code]').count()) === 0 && !ctl.calls.some((c) => c.path === '/auth/telegram/poll'), 'экрана с числом нет, опрос не начинается');
+      ok(await page.locator('[data-act="tg-start"]').isEnabled(), 'кнопка «Получить код» снова доступна');
       noErrors(errors);
       await ctx.close();
     }
@@ -724,7 +697,7 @@ const PUSH_STUB = () => {
       ok(box && top && top.y >= box.y + box.height - 1, 'плашка не закрывает экран: содержимое сдвинуто вниз');
       ok((await page.evaluate(() => localStorage.getItem('finpuls-session'))) === null && !!(await page.evaluate(() => sessionStorage.getItem('finpuls-session'))), 'признак входа тестовой вкладки — в sessionStorage; рабочий localStorage не тронут');
       ok((await page.locator('.sheet .push-offer').count()) === 0 && !ctl.calls.some((c) => c.path === '/devices'), 'push в тестовой вкладке не предлагается и не регистрируется');
-      await shot(page, '11-test-plashka');
+      await shot(page, '10-test-plashka');
       await page.locator('.tabbar .tab[data-go="#/requests"]').click();
       await settle(page, 800);
       await page.reload();
@@ -874,7 +847,7 @@ const PUSH_STUB = () => {
       ok(norm(await page.locator('[data-bud-split]').innerText()).includes('из 1 500 000 ₸ приходится 900 000 ₸'), 'пояснение: в заявке несколько статей');
       const w = await page.locator('.screen:not(.leaving) .bud-req').evaluate((e) => parseFloat(e.style.width));
       ok(Math.abs(w - (900000 / 2200000) * 100) < 0.02, `полоска заявки — по доле статьи (${w}%)`);
-      await shot(page, '12-zayavka-dve-stati');
+      await shot(page, '11-zayavka-dve-stati');
       await page.locator('.screen:not(.leaving) [data-act="approve"]').click();
       await settle(page, 500);
       ok(norm(await page.locator('.sheet .over-note').innerText()).includes('Сверх лимита на 200 000 ₸'), 'подтверждение согласования — то же превышение (200 000)');

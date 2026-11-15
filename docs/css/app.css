@@ -1138,3 +1138,4 @@ button.period-chip { gap: 4px; }
 [data-project] .rh-who { margin-top: 12px; font: 600 20px/1.2 var(--f-head); letter-spacing: -0.015em; color: var(--ink); }
 [data-project] .rh-purpose { margin-top: 5px; font-size: 14.5px; color: var(--stone); }
 [data-project] .rh-sum { margin-top: 14px; }
+.prj-fail-btns { display: flex; flex-direction: column; gap: 10px; margin-top: 4px; align-items: center; }

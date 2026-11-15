@@ -296,6 +296,7 @@ async function mockApi(page, ctl) {
       st.decided = true;
       return json(200, card({ status: 'draft', my_action: 'returned', my_decision_at: T(TODAY, '10:20') }));
     }
+    if (st.rep501 && /^\/orgs\/org_test\/reports\/(cash-flow|plan-fact|debtors)$/.test(p)) return err(501, 'not_implemented', 'Раздел появится позже');
     if (p === '/orgs/org_test/reports/plan-fact' && st.noPlan) return json(200, { updated_at: T(TODAY, '10:15'), month: '2026-10', title: 'Октябрь 2026', has_plan: false, income: [{ article: 'Оплата от покупателей', plan: null, fact: 68750000 }], expense: [{ article: 'Аренда', plan: null, fact: 1900000 }, { article: 'Связь', plan: null, fact: 50000 }] });
     if (p === '/orgs/org_test/reports/cash-flow') return json(200, { updated_at: T(TODAY, '10:15'), month: '2026-10', title: 'Октябрь 2026', inflow: 24000000, outflow: 21650000, weeks: [{ label: '1–4', from: '2026-10-01', to: '2026-10-04', inflow: 9800000, outflow: 8450000 }, { label: '5–11', from: '2026-10-05', to: '2026-10-11', inflow: 14200000, outflow: 13200000 }] });
     if (p === '/orgs/org_test/reports/plan-fact') return json(200, { updated_at: T(TODAY, '10:15'), month: '2026-10', title: 'Октябрь 2026', has_plan: true, income: [{ article: 'Оплата от покупателей', plan: 72000000, fact: 68750000 }], expense: [{ article: 'Аренда', plan: 1800000, fact: 1900000 }, { article: 'Связь', plan: null, fact: 50000 }] });
@@ -304,6 +305,7 @@ async function mockApi(page, ctl) {
     if (p === '/orgs/org_test/reports/projects' || p.startsWith('/orgs/org_test/reports/projects/')) {
       if (st.prj403) return err(403, 'report_unavailable', 'Отчёт недоступен');
       if (p !== '/orgs/org_test/reports/projects') {
+        if (st.prjCard503) return err(503, 'source_unavailable', 'Нет связи с учётом компании', undefined, { 'Retry-After': '30' });
         const c = PRJ.cards[decodeURIComponent(p.split('/').pop())];
         return c ? json(200, c) : err(404, 'not_found', 'Проект не найден');
       }
@@ -1052,6 +1054,22 @@ const PUSH_STUB = () => {
       await settle(page, 400);
       ok(prjCalls().length === lb + 1, '«К списку проектов» — список перечитан');
 
+      // учёт не ответил на карточке (на бою так приходит и «проекта нет»: 503 вместо 404) — два выхода, не «нет связи» на весь экран
+      st.prjCard503 = true;
+      await page.locator('.screen:not(.leaving) .prj[data-prj="prj_demo_7d4c"]').click();
+      await page.waitForSelector('.screen:not(.leaving) [data-prj-failed]', { timeout: 8000 });
+      await settle(page, 400);
+      const failed = norm(await page.locator('.screen:not(.leaving) [data-prj-failed]').innerText());
+      ok(failed.includes('Не удалось открыть проект') && failed.includes('Повторить') && failed.includes('К списку проектов') && (await page.locator('.screen:not(.leaving) .err-state').count()) === 0, '503 на карточке — «Не удалось открыть проект», кнопки «Повторить» и «К списку проектов»');
+      await shot(page, '20-proekt-ne-otkrylsya');
+      st.prjCard503 = false;
+      await page.locator('.screen:not(.leaving) [data-prj-failed] [data-act="retry"]').click();
+      await page.waitForSelector('.screen:not(.leaving) [data-project="prj_demo_7d4c"]', { timeout: 8000 });
+      ok(true, '«Повторить» — карточка открылась');
+      await page.locator('.topbar [data-back]').click();
+      await page.waitForSelector('.screen:not(.leaving) [data-prj-totals]', { timeout: 8000 });
+      await settle(page, 400);
+
       // порции: 120 проектов, страница 50
       st.prjMany = 120;
       await page.locator('.screen:not(.leaving) [data-act="prj-chip"][data-v="in_work"]').click();
@@ -1091,9 +1109,17 @@ const PUSH_STUB = () => {
       await page.reload();
       await page.waitForSelector('.screen:not(.leaving) [data-error="report_unavailable"]', { timeout: 10000 });
       const gone = norm(await page.locator('.screen:not(.leaving) [data-error="report_unavailable"]').innerText());
-      ok(gone.includes('Отчёты по проектам недоступны') && gone.includes('ФинПульс 1.16.2') && gone.includes('учёт по проектам') && gone.includes('права руководителя'), 'отчёт в списке, но сервер отвечает 403 — «Отчёты по проектам недоступны…»');
+      ok(gone.includes('Проекты сейчас недоступны') && gone.includes('Доступ к отчётам в приложении включает администратор ФинПульса в 1С вашей компании.') && !/руководител|1\.16\.2/.test(gone), 'отчёт в списке, но сервер отвечает 403 — «Проекты сейчас недоступны. Доступ к отчётам… включает администратор…», роль не названа');
       ok((await page.locator('.screen:not(.leaving) .seg-btn').count()) === 2, 'переключатель на месте — можно уйти в другой отчёт');
       await shot(page, '19-proekty-nedostupny');
+      // 501 у отчёта из списка — то же, что 403: «недоступен» и перечитанный /orgs
+      st.rep501 = true;
+      const m501 = ctl.calls.length;
+      await page.locator('.screen:not(.leaving) .seg-btn[data-go="#/reports/debtors"]').click();
+      await page.waitForFunction(() => (document.querySelector('.screen:not(.leaving) [data-error="report_unavailable"] b')?.textContent || '').includes('Должники'), null, { timeout: 8000 });
+      const gone501 = norm(await page.locator('.screen:not(.leaving) [data-error="report_unavailable"]').innerText());
+      ok(gone501.includes('Должники сейчас недоступны') && gone501.includes('включает администратор ФинПульса') && ctl.calls.slice(m501).some((c) => c.path === '/orgs' && c.method === 'GET'), '501 у отчёта из списка — «Должники сейчас недоступны», /orgs перечитан');
+      st.rep501 = false;
       noErrors(errors);
       await ctx.close();
     }

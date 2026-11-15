@@ -1956,9 +1956,12 @@ function reportsHead(list, tab, chip = '') {
 const reportsStub = () => laterView({ key: 'later:reports', tab: 'reports', title: 'Отчёты' });
 
 // 403 report_unavailable — отчёт этому пользователю больше недоступен (выключили в 1С, сняли права, база без общего
-// прохода). Перечитываем /orgs: пункт пропал из списка — вкладка перестраивается; остался — честно пишем «недоступно».
+// прохода); 501 not_implemented у отчёта — то же самое от базы, которая отчётов ещё не объявила. Перечитываем /orgs:
+// пункт пропал из списка — вкладка перестраивается; остался — честно пишем «недоступно». Причину и роль не называем:
+// отказ один на все случаи, доступ включает администратор ФинПульса в 1С.
+const REPORT_GONE = { dds: 'ДДС сейчас недоступен', plan: 'План-факт сейчас недоступен', debtors: 'Должники сейчас недоступны', projects: 'Проекты сейчас недоступны' };
 async function reportGone(e, org, tab) {
-  if (!(e instanceof ApiError) || e.code !== 'report_unavailable') throw e;
+  if (!(e instanceof ApiError) || (e.code !== 'report_unavailable' && e.code !== 'not_implemented')) throw e;
   invalidate();
   let list = [];
   try {
@@ -1975,10 +1978,8 @@ async function reportGone(e, org, tab) {
       ${reportsHead(list, tab)}
       <div class="empty err-state" data-error="report_unavailable" role="alert">
         <span class="empty-ic err">${I.shield}</span>
-        <b>${tab === 'projects' ? 'Отчёты по проектам недоступны' : 'Отчёт недоступен'}</b>
-        <span>${tab === 'projects'
-    ? 'Нужны ФинПульс 1.16.2 в 1С, включённый учёт по проектам и права руководителя. Обратитесь к администратору вашей компании.'
-    : 'Отчёт выключен в 1С или у вас нет на него прав. Обратитесь к администратору вашей компании.'}</span>
+        <b>${REPORT_GONE[tab] || 'Отчёт сейчас недоступен'}</b>
+        <span>Доступ к отчётам в приложении включает администратор ФинПульса в 1С вашей компании.</span>
         <button class="btn btn-secondary" data-act="retry">${I.refresh}Обновить</button>
       </div>
     </div>`,
@@ -2295,6 +2296,15 @@ async function projectCard(org, id) {
       return {
         key: `prj:${id}`, depth: 2, title: 'Проект',
         html: `${topbar('Проект', '#/reports/projects')}<div class="scroll has-topbar"><div class="empty" data-prj-missing><span class="empty-ic">${I.info}</span><b>Проект не найден</b><span>Возможно, его удалили в 1С или он относится к другой организации</span><button class="btn btn-secondary" data-go="#/reports/projects">К списку проектов</button></div></div>`,
+      };
+    }
+    // Учёт не ответил. На бою так приходит и «проекта больше нет»: хостинг базы подменяет 404 своей страницей, до
+    // приложения доходит 503. Поэтому не «нет связи» на весь экран, а два выхода: повторить или вернуться к списку.
+    if (e instanceof ApiError && ['upstream_unavailable', 'server_unavailable', 'server_error', 'timeout'].includes(e.code)) {
+      prjData = null; // если проекта больше нет — список перечитается
+      return {
+        key: `prj:${id}`, depth: 2, title: 'Проект',
+        html: `${topbar('Проект', '#/reports/projects')}<div class="scroll has-topbar"><div class="empty" data-prj-failed="${e.code}" role="alert"><span class="empty-ic">${I.info}</span><b>Не удалось открыть проект</b><span>Учёт компании не ответил, или проекта больше нет. Повторите или вернитесь к списку.</span><div class="prj-fail-btns"><button class="btn btn-primary" data-act="retry">${I.refresh}Повторить</button><button class="btn btn-secondary" data-go="#/reports/projects">К списку проектов</button></div></div></div>`,
       };
     }
     throw e;

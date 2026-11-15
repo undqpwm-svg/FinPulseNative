@@ -195,7 +195,7 @@ function serve() {
     }
     const text = norm(await page.locator(screen).innerText());
     fs.writeFileSync(path.join(OUT, `${base}.txt`), text, 'utf8');
-    const junk = text.match(/NaN|undefined|Invalid Date|\[object Object\]|\bnull\b/g);
+    const junk = text.match(/NaN|Infinity|undefined|Invalid Date|\[object Object\]|\bnull\b/g);
     ok(!junk, `${title}: в тексте нет мусора${junk ? ` — найдено: ${[...new Set(junk)].join(', ')}` : ''}`);
     const wide = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1);
     ok(!wide, `${title}: нет горизонтальной прокрутки`);

@@ -679,7 +679,7 @@ button.mc:active { background: var(--milk); }
 .debt-bar { position: relative; height: 6px; margin: 8px 0; border-radius: 4px; background: var(--track); overflow: hidden; }
 .debt-bar i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 4px; background: #cfc8b9; transform-origin: left; animation: growX 0.7s var(--ease) both; }
 .debt-bar i.od { background: var(--neg); }
-.debt-sub { display: flex; justify-content: space-between; align-items: center; gap: 10px; font-size: 12.5px; }
+.debt-sub { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 6px 10px; font-size: 12.5px; }
 .debt-sub .neg { font-weight: 600; font-family: var(--f-head); }
 .debt-rest { display: flex; justify-content: space-between; gap: 10px; padding-top: 12px; border-top: 1px solid var(--line); font-size: 13.5px; color: var(--stone); }
 .debt-rest b { font-family: var(--f-head); color: var(--ink); }

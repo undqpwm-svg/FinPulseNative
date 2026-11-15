@@ -1877,13 +1877,13 @@ const factRow = (x) => `<div class="pf noplan">
 
 function pfRow(x, income = false) {
   if (x.plan == null) return factRow(x);
-  const p = x.plan ? Math.round((x.fact / x.plan) * 100) : 0;
+  const p = x.plan ? `${Math.round((x.fact / x.plan) * 100)}%` : x.fact ? '—' : '0%'; // план 0: процент считать не от чего
   const over = !income && x.fact > x.plan;
   const scale = Math.max(x.plan, x.fact) || 1;
   const fillW = (Math.min(x.fact, x.plan) / scale) * 100;
   const overW = over ? ((x.fact - x.plan) / scale) * 100 : 0;
   return `<div class="pf ${over ? 'over' : ''} ${income ? 'income' : ''}">
-    <div class="pf-top"><span>${H(x.article)}</span><b>${p}%</b></div>
+    <div class="pf-top"><span>${H(x.article)}</span><b>${p}</b></div>
     <div class="pf-bar">
       <i class="pf-fill" style="width:${fillW}%"></i>
       ${over ? `<i class="pf-over" style="left:${fillW}%;width:${overW}%"></i><span class="pf-plan" style="left:${(x.plan / scale) * 100}%"></span>` : ''}
@@ -1905,7 +1905,7 @@ function planFact(rep) {
       </section>`;
   }
   const overs = (rep.expense || []).filter((x) => x.plan != null && x.fact > x.plan);
-  return `${overs.length ? `<div class="over-note">${I.alert}<div><b>${overs.length} ${plural(overs.length, ['статья', 'статьи', 'статей'])} сверх плана</b><span>${overs.map((x) => `${H(x.article)} +${Math.round((x.fact / x.plan - 1) * 100)}%`).join(', ')}</span></div></div>` : ''}
+  return `${overs.length ? `<div class="over-note">${I.alert}<div><b>${overs.length} ${plural(overs.length, ['статья', 'статьи', 'статей'])} сверх плана</b><span>${overs.map((x) => `${H(x.article)}${x.plan > 0 ? ` +${Math.round((x.fact / x.plan - 1) * 100)}%` : ''}`).join(', ')}</span></div></div>` : ''}
     ${(rep.income || []).length ? `<section class="card"><div class="card-head"><h2>Поступления</h2></div>${rep.income.map((x) => pfRow(x, true)).join('')}</section>` : ''}
     <section class="card">
       <div class="card-head"><h2>Выплаты по статьям</h2><span class="muted">факт / план</span></div>
@@ -2052,7 +2052,7 @@ function prjRow(p) {
   const due = p.paid + p.debt;
   const paidPct = due > 0 ? Math.max(0, Math.min(100, Math.round((p.paid / due) * 100))) : 100;
   return `<button class="prj ${p.withoutId ? 'noid' : ''}" data-go="#/reports/projects/${encodeURIComponent(p.id)}" data-prj="${H(p.id)}">
-    <span class="prj-top"><span class="prj-id">${p.withoutId ? `Реализация № ${H(p.saleNumber || '—')}` : H(p.projectId || '—')}</span>${p.withoutId ? '<span class="tag tag-warn">Без ID</span>' : prjStatusTag(p)}${p.orderDate ? `<span class="prj-date">заказ ${ddmmyy(p.orderDate)}</span>` : ''}</span>
+    <span class="prj-top"><span class="prj-id">${p.withoutId ? `Реализация № ${H(p.saleNumber || '—')}` : H(p.projectId || '—')}</span>${p.withoutId ? '<span class="tag tag-warn">Без ID</span>' : prjStatusTag(p)}${p.orderDate ? `<span class="prj-date">${p.withoutId ? '' : 'заказ '}${ddmmyy(p.orderDate)}</span>` : ''}</span>
     <span class="prj-main"><b class="prj-who">${H(p.customer)}</b><b class="prj-amt">${moneyShort(p.revenue)}</b></span>
     ${p.description ? `<span class="prj-desc">${H(p.description)}</span>` : ''}
     <span class="prj-bar"><i style="width:${paidPct}%"></i></span>

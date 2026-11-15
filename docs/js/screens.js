@@ -1447,7 +1447,50 @@ actions['req-tab'] = (t) => {
 // Только согласование: отклонить и вернуть на доработку требуют комментарий — по одной, из карточки.
 // Заявки сверх лимита в выбор не попадают: их согласуют по одной, глядя в карточку (переключается в config.js,
 // bulkOverLimit).
-let bulk = null; // { items, today, sel: Set(id), keys: Map(id → ключ), res: Map(id → итог), running, stop }
+let bulk = null; // { items, today, sel: Set(id), res: Map(id → итог), running, stop, finished }
+
+// Ключ согласования заявки (Idempotency-Key). В 1С два одновременных решения одной заявки с разными ключами могут
+// записаться дважды, поэтому ключ у заявки один, пока по ней нет окончательного ответа: повтор после обрыва, 504
+// или 503 — в той же серии, в новой серии или из карточки — идёт с тем же ключом, и сервер отвечает «уже принято»
+// (Idempotent-Replayed), а не решает заново. Окончательный ответ (200, 409, 422, 404, 403) ключ снимает: следующее
+// согласование — новое действие пользователя с новым ключом. Ключи живут в памяти и в sessionStorage вкладки —
+// переживают обновление страницы; это не токены, в запросах к серверу они и так уходят заголовком.
+const APPROVE_KEYS = 'finpuls-approve-keys';
+const approveKeys = (() => {
+  let m = {};
+  try {
+    m = JSON.parse(sessionStorage.getItem(APPROVE_KEYS) || '{}') || {};
+  } catch (e) {
+    m = {};
+  }
+  const fresh = Date.now() - 24 * 3600e3;
+  Object.keys(m).forEach((k) => {
+    if (!m[k] || typeof m[k].key !== 'string' || !(m[k].at > fresh)) delete m[k];
+  });
+  return m;
+})();
+function saveApproveKeys() {
+  try {
+    sessionStorage.setItem(APPROVE_KEYS, JSON.stringify(approveKeys));
+  } catch (e) {
+    /* хранилище недоступно — ключи остаются в памяти */
+  }
+}
+function approveKey(org, id) {
+  const k = `${org}/${id}`;
+  if (!approveKeys[k]) {
+    approveKeys[k] = { key: uuid(), at: Date.now() };
+    saveApproveKeys();
+  }
+  return approveKeys[k].key;
+}
+function approveSettled(org, id) {
+  delete approveKeys[`${org}/${id}`];
+  saveApproveKeys();
+}
+// Ответа, после которого судьба решения неизвестна или оно точно не принято из-за связи: ключ остаётся.
+const OPEN_CODES = ['network', 'timeout', 'upstream_unavailable', 'server_unavailable', 'too_many_requests', 'server_error'];
+const keepsKey = (e) => !(e instanceof ApiError) || (OPEN_CODES.includes(e.code) && (e.details || {}).contractCode !== 'idempotency_key_reused');
 const bulkOk = (r) => CONFIG.bulkOverLimit || !(r.overLimit > 0);
 const REQ_ACC = ['заявку', 'заявки', 'заявок'];
 const bulkPicked = () => (bulk ? bulk.items.filter((r) => bulk.sel.has(r.id)) : []);
@@ -1550,7 +1593,6 @@ actions['bulk-confirm'] = () => {
   const picked = bulkPicked();
   if (!picked.length) return;
   bulk.res = new Map();
-  bulk.keys = new Map(); // новое подтверждение — новые ключи: это новое действие пользователя
   const over = picked.filter((r) => r.overLimit > 0);
   openSheet(`<div class="sheet-title">Согласовать ${picked.length} ${plural(picked.length, REQ_ACC)}?</div>
     <div class="confirm-sum">${money(sum(picked, (r) => r.amount))}</div>
@@ -1571,8 +1613,11 @@ function bulkFail(e, today) {
   if (c === 'already_decided') {
     const det = e.details || {};
     const what = det.status === 'rejected' ? 'отклонена' : det.status === 'returned' ? 'возвращена на доработку' : 'согласована';
-    return { st: 'info', text: e.message || `Уже ${what}${det.by ? `: ${det.by}` : ''}${det.at ? `, ${stampAt(det.at, today)}` : ''}` };
+    // кто и когда — из details (6.4); нет имени — текст сервера как есть
+    return { st: 'info', text: det.by ? `Уже ${what}: ${det.by}${det.at ? `, ${stampAt(det.at, today)}` : ''}` : e.message || `Уже ${what}` };
   }
+  // ключ уже использован для другого решения — ошибка самого приложения: ключ снят, повтор уйдёт с новым
+  if (raw === 'idempotency_key_reused') return { st: 'fail', text: 'Не удалось отправить решение — повторите', retry: true };
   if (raw === 'not_awaiting_you') return { st: 'info', text: 'Сейчас не на вашем этапе — решение не отправлено' };
   if (c === 'forbidden') return { st: 'fail', text: 'Нет прав на это решение' };
   if (c === 'action_failed') return { st: 'fail', text: e.message || 'Учёт не принял решение' };
@@ -1629,15 +1674,16 @@ async function bulkRun(ids) {
       bulkRowUpdate(r);
       continue;
     }
-    if (!bulk.keys.has(r.id)) bulk.keys.set(r.id, uuid());
+    const key = approveKey(org, r.id); // один ключ на заявку, пока по ней нет окончательного ответа
     bulk.res.set(r.id, { st: 'run', text: 'Отправляется…' });
     bulkRowUpdate(r);
     let out;
     for (let attempt = 0; ; attempt++) {
       try {
-        const res = await api.decide(org, r.id, { decision: 'approve', comment: '', idempotencyKey: bulk.keys.get(r.id) });
+        const res = await api.decide(org, r.id, { decision: 'approve', comment: '', idempotencyKey: key });
         const final = !res || !res.requestStatus || res.requestStatus === 'approved';
         out = { st: 'ok', text: final ? 'Согласована' : `Согласована · дальше ${res.nextApprover || 'следующий этап'}` };
+        approveSettled(org, r.id);
         break;
       } catch (e) {
         if (isSessionEnd(e)) {
@@ -1656,6 +1702,7 @@ async function bulkRun(ids) {
           continue; // тот же ключ: сервер проверит, применилось ли решение
         }
         out = bulkFail(e, bulk.today);
+        if (!keepsKey(e)) approveSettled(org, r.id);
         break;
       }
     }
@@ -2033,16 +2080,23 @@ async function submitDecision(kind, comment, btn) {
   const r = ui.request;
   if (!r || ui.busy) return;
   // Тот же ключ при повторе той же операции: сервер не применит решение дважды.
+  // Согласование — ключ заявки (approveKey): он один и для карточки, и для массового согласования.
+  const orgNow = api.orgId();
   if (!ui.decision || ui.decision.reqId !== r.id || ui.decision.kind !== kind) {
-    ui.decision = { reqId: r.id, kind, comment, key: uuid() };
+    ui.decision = { reqId: r.id, kind, comment, key: kind === 'approve' ? approveKey(orgNow, r.id) : uuid() };
   }
   ui.decision.comment = comment;
   setBusy(btn, 'Отправляется…');
   let res;
   try {
-    res = await api.decide(api.orgId(), r.id, { decision: kind, comment, idempotencyKey: ui.decision.key });
+    res = await api.decide(orgNow, r.id, { decision: kind, comment, idempotencyKey: ui.decision.key });
   } catch (e) {
     ui.busy = false;
+    if (kind === 'approve' && !isSessionEnd(e) && !keepsKey(e)) {
+      approveSettled(orgNow, r.id); // окончательный отказ: следующее согласование — с новым ключом
+      if ((e.details || {}).contractCode === 'idempotency_key_reused') ui.decision.key = approveKey(orgNow, r.id); // «Повторить» — уже с новым
+      else ui.decision = null;
+    }
     if (isSessionEnd(e)) {
       await closeSheet(true);
       onUnauthorized(e);
@@ -2053,6 +2107,7 @@ async function submitDecision(kind, comment, btn) {
   }
   ui.busy = false;
   ui.decision = null;
+  if (kind === 'approve') approveSettled(orgNow, r.id);
   invalidate();
   await closeSheet();
   const amount = money(r.amount);

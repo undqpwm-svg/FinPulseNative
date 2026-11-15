@@ -278,6 +278,10 @@ async function mockApi(page, ctl) {
     // ---- массовое согласование: st.bulk = { items, plan: { id: [исход 1-й попытки, 2-й, …] }, delay } ----
     // Исходы: ok, next (ушла на следующий этап), decided (409), stage (409 not_awaiting_you), failed (422),
     // 503, 504 (решение не применено), 504-applied (применено, ответ потерян), abort (обрыв связи).
+    if (st.bulk && /^\/orgs\/org_test\/requests\/req_b\d+$/.test(p)) {
+      const c = st.bulk.items.find((x) => x.id === p.split('/')[4]);
+      return c ? json(200, c) : err(404, 'not_found', 'Заявка не найдена');
+    }
     if (st.bulk && (p === '/orgs/org_test/requests' || /^\/orgs\/org_test\/requests\/req_b\d+\/approve$/.test(p))) {
       const B = st.bulk;
       B.gone = B.gone || new Set();
@@ -310,6 +314,7 @@ async function mockApi(page, ctl) {
       }
       if (how === 'stage') return err(409, 'not_awaiting_you', 'Заявка сейчас не на вашем этапе');
       if (how === 'failed') return err(422, 'action_failed', 'Заявка заблокирована другим пользователем: Бекова Г. Т.');
+      if (how === 'reused') return err(422, 'idempotency_key_reused', 'Ключ уже использован для другого решения');
       if (how === '503') return err(503, 'source_unavailable', 'Нет связи с учётом компании', undefined, { 'Retry-After': '30' });
       if (how === '504') return err(504, 'source_timeout', 'Учёт не успел ответить');
       if (how === '504-applied') {
@@ -1355,7 +1360,7 @@ const PUSH_STUB = () => {
       ok(keys.every((k) => /^[0-9a-f-]{36}$/.test(k || '')) && new Set(keys).size === keys.length && B.log.every((x) => x.body && Object.keys(x.body).length === 0), 'у каждой заявки свой Idempotency-Key, тело запроса — {}');
       ok(sh.includes('Согласовано 1 из 5') && sh.includes('На 200 000 ₸'), 'итог: «Согласовано 1 из 5», сумма согласованных');
       ok(sh.includes('Согласована · дальше Финотдел'), 'согласована, но этап не последний — «дальше Финотдел»');
-      ok(sh.includes('Заявку уже согласовал Самат Ахметов 11.11.2026 в 10:12'), '409 already_decided — текст сервера: кто и когда');
+      ok(/Уже согласована: Самат Ахметов, .*10:12/.test(sh), '409 already_decided — «Уже согласована: Самат Ахметов, …, 10:12» (кто и когда — из details)');
       ok(sh.includes('Сейчас не на вашем этапе — решение не отправлено'), '409 not_awaiting_you — «не на вашем этапе»');
       ok(sh.includes('Не принято: 1С сейчас недоступна') && sh.includes('Не отправлялась'), '503 — «не принято», следующая заявка не отправлялась');
       ok(norm(await page.locator('.sheet-wrap [data-act="bulk-retry"]').innerText()).includes('Повторить неудачные (2)'), 'кнопка «Повторить неудачные (2)» — только то, что можно повторить');
@@ -1442,6 +1447,115 @@ const PUSH_STUB = () => {
       await page.locator('.sheet-backdrop').click({ position: { x: 20, y: 20 }, force: true });
       await settle(page, 1200);
       ok((await page.locator('.sheet-wrap').count()) === 0 && ctl.calls.slice(m).some((c) => c.path === '/orgs/org_test/requests') && (await page.locator(`${scrB} .req-card`).count()) === 4 && (await page.locator(`${scrB} .scroll.selecting`).count()) === 0, 'итог закрыт нажатием мимо шторки — список перечитан (осталось 4), режим выбора снят');
+      noErrors(errors);
+      await ctx.close();
+    }
+    const runSeries = async (page) => {
+      await page.locator(`${scrB} [data-act="bulk-start"]`).click();
+      await page.locator(`${scrB} [data-act="bulk-all"]`).click();
+      await page.locator(`${scrB} [data-bulk-go]`).click();
+      await settle(page, 400);
+      await page.locator('.sheet-wrap [data-act="bulk-send"]').click();
+      await waitResult(page);
+      await settle(page, 300);
+    };
+    {
+      // один ключ на заявку, пока нет окончательного ответа: новая серия и карточка шлют тот же ключ
+      const { ctx, page, errors, ctl } = await newCtx();
+      ctl.state.bulk = { items: bulkItems(5), plan: { req_b2: ['failed'], req_b3: ['503'] } };
+      const B = ctl.state.bulk;
+      await page.goto(BASE);
+      await settle(page, 800);
+      await login(page, ctl);
+      await openRequests(page);
+      await runSeries(page);
+      const of = (id) => B.log.filter((x) => x.id === id);
+      ok(of('req_b2').length === 1 && of('req_b3').length === 1 && of('req_b4').length === 0, 'первая серия: 422 по одной заявке серию не останавливает, 503 — останавливает');
+      const [k2, k3] = [of('req_b2')[0].key, of('req_b3')[0].key];
+      await page.locator('.sheet-wrap [data-act="bulk-done"]').click();
+      await settle(page, 1200);
+      ok((await page.evaluate(() => Object.keys(JSON.parse(sessionStorage.getItem('finpuls-approve-keys') || '{}')).join(','))) === 'org_test/req_b3', 'после серии в памяти остался ключ только той заявки, по которой нет окончательного ответа');
+      await page.reload();
+      await settle(page, 1500);
+      await openRequests(page);
+      await runSeries(page);
+      ok(of('req_b3').length === 2 && of('req_b3')[1].key === k3, 'новая серия (даже после обновления страницы): заявка без окончательного ответа уходит с прежним ключом');
+      ok(of('req_b2').length === 2 && of('req_b2')[1].key !== k2, 'заявка с окончательным отказом (422) в новой серии — с новым ключом');
+      ok((await sheetText(page)).includes('Согласовано: 4') && (await page.evaluate(() => sessionStorage.getItem('finpuls-approve-keys'))) === '{}', 'все согласованы — ключей в памяти не осталось');
+      noErrors(errors);
+      await ctx.close();
+    }
+    {
+      // после обрыва в серии ту же заявку согласуют из карточки — тем же ключом
+      const { ctx, page, errors, ctl } = await newCtx();
+      ctl.state.bulk = { items: bulkItems(3), plan: { req_b2: ['abort', 'abort'] } };
+      const B = ctl.state.bulk;
+      await page.goto(BASE);
+      await settle(page, 800);
+      await login(page, ctl);
+      await openRequests(page);
+      await runSeries(page);
+      const key = B.log[0].key;
+      ok(B.log.length === 2 && B.log[1].key === key, 'обрыв: автоматический повтор — с тем же ключом');
+      await page.locator('.sheet-wrap [data-act="bulk-done"]').click();
+      await settle(page, 1200);
+      await page.locator(`${scrB} .req-card[data-go="#/requests/req_b2"]`).click();
+      await page.waitForSelector(`${scrB} [data-act="approve"]`, { timeout: 8000 });
+      await settle(page, 500);
+      await page.locator(`${scrB} [data-act="approve"]`).click();
+      await settle(page, 500);
+      await page.locator('.sheet-wrap [data-act="approve-confirm"]').click();
+      await page.waitForFunction(() => location.hash === '#/requests', null, { timeout: 12000 });
+      ok(B.log.length === 3 && B.log[2].id === 'req_b2' && B.log[2].key === key, 'согласование той же заявки из карточки — с тем же ключом, что в серии');
+      await settle(page, 2200);
+      ok((await page.evaluate(() => sessionStorage.getItem('finpuls-approve-keys'))) === '{}', 'после ответа 200 ключ снят');
+      noErrors(errors);
+      await ctx.close();
+    }
+    {
+      // токен истёк посреди серии: обновление и повтор той же заявки с тем же ключом, серия идёт дальше
+      const { ctx, page, errors, ctl } = await newCtx();
+      ctl.state.bulk = { items: bulkItems(4), plan: {} };
+      const B = ctl.state.bulk;
+      await page.goto(BASE);
+      await settle(page, 800);
+      await login(page, ctl);
+      await openRequests(page);
+      let expired = false;
+      ctl.override = (call, { st }) => {
+        if (!expired && call.path === '/orgs/org_test/requests/req_b3/approve') {
+          expired = true;
+          st.expireAccess = st.access;
+          st.access = 'at_series';
+        }
+        return false;
+      };
+      await runSeries(page);
+      const b3 = ctl.calls.filter((c) => c.path === '/orgs/org_test/requests/req_b3/approve');
+      ok(b3.length === 2 && b3[0].headers['idempotency-key'] === b3[1].headers['idempotency-key'] && b3[0].headers.authorization !== b3[1].headers.authorization && ctl.calls.filter((c) => c.path === '/auth/refresh').length === 1, '401 token_expired посреди серии: одно обновление токена, повтор той же заявки с тем же ключом');
+      ok((await sheetText(page)).includes('Согласовано: 3') && B.log.map((x) => x.id).join(' ') === 'req_b2 req_b3 req_b4' && B.maxActive === 1, 'серия дошла до конца: согласованы все три, запросы шли по одному');
+      ctl.override = null;
+      noErrors(errors);
+      await ctx.close();
+    }
+    {
+      // 504, решение не применено: повтор с тем же ключом выполняет его; 422 idempotency_key_reused — «повторите», новый ключ
+      const { ctx, page, errors, ctl } = await newCtx();
+      ctl.state.bulk = { items: bulkItems(4), plan: { req_b2: ['504'], req_b3: ['reused'] } };
+      const B = ctl.state.bulk;
+      await page.goto(BASE);
+      await settle(page, 800);
+      await login(page, ctl);
+      await openRequests(page);
+      await runSeries(page);
+      const of = (id) => B.log.filter((x) => x.id === id);
+      const sh = await sheetText(page);
+      ok(of('req_b2').length === 2 && of('req_b2')[0].key === of('req_b2')[1].key && (await page.locator('.sheet-wrap .bk-row[data-bk="req_b2"]').getAttribute('data-st')) === 'ok', '504 source_timeout: повтор с тем же ключом — заявка согласована');
+      ok(sh.includes('Не удалось отправить решение — повторите') && of('req_b4').length === 1 && sh.includes('Согласовано 2 из 3'), '422 idempotency_key_reused — «Не удалось отправить решение — повторите», серия идёт дальше');
+      await page.locator('.sheet-wrap [data-act="bulk-retry"]').click();
+      await waitResult(page);
+      await settle(page, 300);
+      ok(of('req_b3').length === 2 && of('req_b3')[1].key !== of('req_b3')[0].key && (await sheetText(page)).includes('Согласовано: 3'), 'повтор после idempotency_key_reused — с новым ключом, заявка согласована');
       noErrors(errors);
       await ctx.close();
     }

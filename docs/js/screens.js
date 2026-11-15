@@ -2283,6 +2283,7 @@ actions['pt-more'] = (t) => {
 };
 
 const LINK_NAMES = { by_id: 'по ID', manual: 'вручную', by_rule: 'по правилу' };
+const dOr = (d) => (d ? dayMonth(D(d)) : 'без даты'); // дата строки таблицы может не прийти
 
 async function projectCard(org, id) {
   let c;
@@ -2302,10 +2303,10 @@ async function projectCard(org, id) {
   const due = c.paid + c.debt;
   const paidW = due > 0 ? Math.max(0, Math.min(100, Math.round((c.paid / due) * 100))) : 100;
   const posted = (x) => (x.posted ? '' : ' · не проведена');
-  const sales = c.sales.map((r, i) => ptRow(r.service || 'Реализация', r.amount, `${dayMonth(D(r.date))}${r.number ? ` · № ${H(r.number)}` : ''}${r.account ? ` · счёт ${H(r.account)}` : ''}${posted(r)}`,
+  const sales = c.sales.map((r, i) => ptRow(r.service || 'Реализация', r.amount, `${dOr(r.date)}${r.number ? ` · № ${H(r.number)}` : ''}${r.account ? ` · счёт ${H(r.account)}` : ''}${posted(r)}`,
     `<span class="tag ${r.kind === 'income' ? 'tag-pos' : ''}">${r.kind === 'income' ? 'доход' : r.kind === 'expense' ? 'расход' : H(r.kind)}</span>`, '', i >= PT_SHOW));
-  const purchases = c.purchases && c.purchases.map((r, i) => ptRow(r.supplier || 'Поступление', r.amount, `${dayMonth(D(r.date))}${r.number ? ` · № ${H(r.number)}` : ''}${posted(r)}`, '', r.note, i >= PT_SHOW));
-  const payments = c.payments.map((r, i) => ptRow(r.comment || r.article || 'Оплата', r.amount, [dayMonth(D(r.date)), H(r.article), H(r.account)].filter(Boolean).join(' · '),
+  const purchases = c.purchases && c.purchases.map((r, i) => ptRow(r.supplier || 'Поступление', r.amount, `${dOr(r.date)}${r.number ? ` · № ${H(r.number)}` : ''}${posted(r)}`, '', r.note, i >= PT_SHOW));
+  const payments = c.payments.map((r, i) => ptRow(r.comment || r.article || 'Оплата', r.amount, [dOr(r.date), H(r.article), H(r.account)].filter(Boolean).join(' · '),
     r.link ? `<span class="tag">${LINK_NAMES[r.link] || H(r.link)}</span>` : '', r.note, i >= PT_SHOW));
   const title = c.withoutId ? `Реализация № ${H(c.saleNumber || '')}` : `Проект ${H(c.projectId || '')}`;
   const statusChip = c.withoutId ? '<span class="status-chip st-wait">Без ID заявки</span>'

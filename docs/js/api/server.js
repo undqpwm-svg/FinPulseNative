@@ -277,9 +277,23 @@ export async function me() {
 export const orgId = () => storage.get(ORG_KEY);
 export const setOrgId = (id) => storage.set(ORG_KEY, id);
 
+// Отчёты организации (4.2, поле reports): имена сервера → вкладки приложения, в порядке, который прислал сервер.
+// Незнакомые имена пропускаем: это новый отчёт, который эта версия показывать не умеет. Поля нет (база до 1.16.2
+// или сервер прежней версии) — отчётов нет.
+const REPORT_TABS = { 'cash-flow': 'dds', 'plan-fact': 'plan', debtors: 'debtors', projects: 'projects' };
+function reportTabs(names) {
+  const out = [];
+  (Array.isArray(names) ? names : []).forEach((n) => {
+    const tab = REPORT_TABS[n];
+    if (tab && !out.includes(tab)) out.push(tab);
+  });
+  return out;
+}
+
 function orgDto(o) {
   return {
     id: o.id,
+    reports: reportTabs(o.reports),
     name: o.name,
     short: o.short_name || o.name,
     initials: o.initials,
@@ -302,6 +316,11 @@ export async function orgs() {
 async function orgInfo(id) {
   if (!orgsCache || !orgsCache.some((o) => o.id === id)) await orgs();
   return orgsCache.find((o) => o.id === id) || { id, name: '', short: '', initials: '' };
+}
+
+// Какие отчёты показывать на вкладке «Отчёты» у этой организации. Список организаций уже загружен — без запроса.
+export async function reportList(id) {
+  return (await orgInfo(id)).reports || [];
 }
 
 const orgPath = (id, rest = '') => `/orgs/${enc(id)}${rest}`;
@@ -553,6 +572,71 @@ export async function report(id, kind) {
   }
   const r = await getJSON(orgPath(id, '/reports/cash-flow'));
   return { period: r.title, weeks: (r.weeks || []).map((w) => ({ label: w.label, full: weekFull(w), in: w.inflow, out: w.outflow })) };
+}
+
+// ---------- проекты (7.4, 7.5) — общий проход отчётов: /orgs/{org}/reports/{имя} и /{имя}/{id} ----------
+// Отборы, сортировку и итоги делает сервер; приложение передаёт параметры и показывает ответ.
+// 403 report_unavailable — отчёт этому пользователю недоступен: экран перечитывает /orgs. 404 — карточки больше нет.
+const projectDto = (p) => ({
+  id: p.id,
+  projectId: p.project_id || null,
+  withoutId: !!p.without_id,
+  saleNumber: p.sale_number || null,
+  orderDate: p.order_date || null,
+  closedDate: p.closed_date || null,
+  customer: p.customer || '',
+  manager: p.manager || null,
+  description: p.description || '',
+  category: p.category || null,
+  status: p.status || '',
+  revenue: Number(p.revenue) || 0,
+  costs: Number(p.costs) || 0,
+  margin: Number(p.margin) || 0,
+  marginPct: Number(p.margin_pct) || 0,
+  paid: Number(p.paid) || 0,
+  debt: Number(p.debt) || 0,
+  salesCount: Number(p.sales_count) || 0,
+});
+
+export async function projects(id, f = {}) {
+  const r = await getJSON(orgPath(id, `/reports/projects?${qs({
+    from: f.from, to: f.to, status: f.status,
+    debt_only: f.debtOnly ? 'true' : null, without_id: f.withoutId ? 'true' : null,
+    sort: f.sort && f.sort !== 'date' ? f.sort : null, limit: f.limit || 50, cursor: f.cursor,
+  })}`));
+  const t = r.totals || {};
+  return {
+    updatedAt: r.updated_at || null,
+    from: r.from || null,
+    to: r.to || null,
+    moneyNote: r.money_note || '',
+    totals: {
+      count: Number(t.count) || 0, withoutId: Number(t.without_id) || 0,
+      revenue: Number(t.revenue) || 0, costs: Number(t.costs) || 0, margin: Number(t.margin) || 0, marginPct: Number(t.margin_pct) || 0,
+      paid: Number(t.paid) || 0, debt: Number(t.debt) || 0,
+    },
+    items: (r.items || []).map(projectDto),
+    nextCursor: r.next_cursor || null,
+  };
+}
+
+export async function project(id, projectId) {
+  const r = await getJSON(orgPath(id, `/reports/projects/${enc(projectId)}`));
+  const f = r.finance || {};
+  return {
+    ...projectDto({ ...r, ...f }),
+    updatedAt: r.updated_at || null,
+    purchasesTotal: f.purchases_total == null ? null : Number(f.purchases_total) || 0,
+    paymentsTotal: f.payments_total == null ? null : Number(f.payments_total) || 0,
+    sales: (r.sales || []).map((x) => ({ date: x.date, number: x.number || '', posted: x.posted !== false, service: x.service || '', account: x.account || '', amount: Number(x.amount_net) || 0, kind: x.kind || '' })),
+    // у проекта без ID поступления по ID не подбираются — null
+    purchases: r.purchases == null ? null : r.purchases.map((x) => ({ date: x.date, number: x.number || '', supplier: x.supplier || '', amount: Number(x.amount) || 0, posted: x.posted !== false, note: x.note || '' })),
+    payments: (r.payments || []).map((x) => ({ date: x.date, article: x.article || '', comment: x.comment || '', account: x.account || '', amount: Number(x.amount) || 0, link: x.link || '', note: x.note || '' })),
+    unassigned: Number(r.unassigned_count) || 0,
+    truncated: r.truncated === true,
+    hint: r.hint || '',
+    moneyNote: r.money_note || '',
+  };
 }
 
 // ---------- уведомления (8) ----------

@@ -11,6 +11,7 @@ export const I = {
   chevR: svg('<path d="m9.5 6 6 6-6 6"/>'),
   chevL: svg('<path d="m14.5 6-6 6 6 6"/>'),
   chevD: svg('<path d="m6.5 9.5 5.5 5.5 5.5-5.5"/>'),
+  sort: svg('<path d="M7 5v14M7 19l-3-3M7 19l3-3M17 19V5M17 5l-3 3M17 5l3 3"/>'),
   arrowR: svg('<path d="M5 12h14M13.5 6.5 19 12l-5.5 5.5"/>'),
   arrowIn: svg('<path d="M17 7 7 17M16.5 17H7V7.5"/>'),
   arrowOut: svg('<path d="M7 17 17 7M7.5 7H17v9.5"/>'),

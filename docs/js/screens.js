@@ -33,7 +33,10 @@ async function cached(key, ttlMs, load) {
   cache.set(key, { at: Date.now(), value });
   return value;
 }
-export const invalidate = () => cache.clear();
+export const invalidate = () => {
+  cache.clear();
+  prjData = null; // загруженный список проектов (ниже, раздел «Проекты»)
+};
 
 // ---------- даты из DTO ----------
 const D = (s) => parseISO(String(s).slice(0, 10));
@@ -95,6 +98,7 @@ export function errorText(e) {
     maintenance: ['Технические работы', 'Сервер на обслуживании. Повторите чуть позже.'],
     app_outdated: ['Обновите приложение', 'Версия устарела: обновите страницу или переустановите приложение с экрана «Домой».'],
     access_revoked: ['Доступ выключен', 'Обратитесь к администратору ФинПульса в своей компании.'],
+    report_unavailable: ['Отчёт недоступен', 'Отчёт выключен в 1С или у вас нет на него прав. Обратитесь к администратору вашей компании.'],
   };
   const [title, text] = map[code] || ['Не удалось загрузить', 'Попробуйте обновить. Если не помогает — напишите в SmartSol.'];
   return { code, title, text };
@@ -966,7 +970,10 @@ function spark(start, points) {
 }
 
 views.home = async () => {
-  const d = await api.home(api.orgId());
+  const orgNow = api.orgId();
+  // Список отчётов организации уже загружен вместе с /orgs — отдельного запроса обычно нет.
+  const [d, reps] = await Promise.all([api.home(orgNow), api.reportList(orgNow).catch(() => [])]);
+  const debtOn = reps.includes('debtors'); // «Нам должны» ведёт в отчёт «Должники», только если база его отдаёт
   const today = D(d.today);
   // Календарь или отчёт ещё не подключены (501) — блоки главной из сводки остаются, но никуда не ведут.
   const calOn = !later.has('calendar');
@@ -1073,14 +1080,14 @@ views.home = async () => {
         <div class="wk-chart">${bars}</div>
       </section>
 
-      <${later.has('debtors') ? 'div' : 'button'} class="card rec-card" ${go('#/reports/debtors', !later.has('debtors'))}>
-        <span class="card-head"><h2>Нам должны</h2>${later.has('debtors') ? '' : `<span class="link-btn">Должники ${I.chevR}</span>`}</span>
+      <${debtOn ? 'button' : 'div'} class="card rec-card" ${go('#/reports/debtors', debtOn)}>
+        <span class="card-head"><h2>Нам должны</h2>${debtOn ? `<span class="link-btn">Должники ${I.chevR}</span>` : ''}</span>
         <span class="rec-sum">${moneyShort(rec.total)}</span>
         <span class="age-title">Долг по возрасту</span>
         ${ageBar(rec.aging, rec.total)}
         ${ageLegend(rec.aging)}
         ${rec.oldest ? `<span class="rec-worst">${I.clock}<span>Самый старый долг: ${H(rec.oldest.name)} — ${rec.oldest.days} ${plural(rec.oldest.days, DAY_FORMS)}</span></span>` : ''}
-      </${later.has('debtors') ? 'div' : 'button'}>
+      </${debtOn ? 'button' : 'div'}>
 
       <p class="foot-note">${I.refresh}<span>Данные 1С на ${d.asOf ? stampAt(d.asOf, d.today) : 'сейчас'}</span></p>
     </div>`,
@@ -1933,27 +1940,424 @@ function debtorsReport(rep) {
     </section>`;
 }
 
-views.reports = async (params) => {
-  const org = api.orgId();
-  const tab = ['dds', 'plan', 'debtors'].includes(params[0]) ? params[0] : 'dds';
-  let rep;
-  try {
-    rep = await cached(`rep:${org}:${tab}`, 60e3, () => api.report(org, tab));
-  } catch (e) {
-    if (isLater(e) && tab === 'debtors') later.add('debtors');
-    throw e;
+// Вкладка «Отчёты» собирается из списка отчётов организации (поле reports в /orgs), в порядке сервера.
+//  несколько отчётов — заголовок «Отчёты» и переключатель; один — без переключателя, заголовок — имя отчёта;
+//  список пуст или поля нет (сервер прежней версии, база до 1.16.2) — заглушка «Раздел появится в следующей версии».
+const REPORT_NAMES = { dds: 'ДДС', plan: 'План-факт', debtors: 'Должники', projects: 'Проекты' };
+
+function reportsHead(list, tab, chip = '') {
+  if (list.length > 1) {
+    return `<div class="page-head"><h1 class="page-title">Отчёты</h1>${chip}</div>
+      ${segmented(list.map((v) => ({ v, label: REPORT_NAMES[v] })), tab, (v) => `data-go="#/reports/${v}" data-dir="same"`)}`;
   }
-  if (tab === 'debtors') later.delete('debtors');
-  const body = tab === 'dds' ? ddsReport(rep) : tab === 'plan' ? planFact(rep) : debtorsReport(rep);
+  return `<div class="page-head"><div><span class="page-over">Отчёты</span><h1 class="page-title">${REPORT_NAMES[tab]}</h1></div>${chip}</div>`;
+}
+
+const reportsStub = () => laterView({ key: 'later:reports', tab: 'reports', title: 'Отчёты' });
+
+// 403 report_unavailable — отчёт этому пользователю больше недоступен (выключили в 1С, сняли права, база без общего
+// прохода). Перечитываем /orgs: пункт пропал из списка — вкладка перестраивается; остался — честно пишем «недоступно».
+async function reportGone(e, org, tab) {
+  if (!(e instanceof ApiError) || e.code !== 'report_unavailable') throw e;
+  invalidate();
+  let list = [];
+  try {
+    await api.orgs();
+    list = await api.reportList(org);
+  } catch (x) {
+    if (isSessionEnd(x)) throw x;
+    list = [tab]; // список не перечитался — остаёмся на отчёте с текстом «недоступно»
+  }
+  if (!list.includes(tab)) return { redirect: '#/reports' };
   return {
-    key: 'reports', tab: 'reports', depth: 1, nav: true, title: 'Отчёты',
+    key: `reports:gone:${tab}`, tab: 'reports', depth: 1, nav: true, title: 'Отчёты',
     html: `<div class="scroll">
-      <div class="page-head"><h1 class="page-title">Отчёты</h1><span class="period-chip">${tab === 'debtors' ? 'на сегодня' : H(rep.period || '')}</span></div>
-      ${segmented([{ v: 'dds', label: 'ДДС' }, { v: 'plan', label: 'План-факт' }, { v: 'debtors', label: 'Должники' }], tab, (v) => `data-go="#/reports/${v}" data-dir="same"`)}
-      <div class="rep-body">${body}</div>
+      ${reportsHead(list, tab)}
+      <div class="empty err-state" data-error="report_unavailable" role="alert">
+        <span class="empty-ic err">${I.shield}</span>
+        <b>${tab === 'projects' ? 'Отчёты по проектам недоступны' : 'Отчёт недоступен'}</b>
+        <span>${tab === 'projects'
+    ? 'Нужны ФинПульс 1.16.2 в 1С, включённый учёт по проектам и права руководителя. Обратитесь к администратору вашей компании.'
+    : 'Отчёт выключен в 1С или у вас нет на него прав. Обратитесь к администратору вашей компании.'}</span>
+        <button class="btn btn-secondary" data-act="retry">${I.refresh}Обновить</button>
+      </div>
     </div>`,
   };
+}
+
+views.reports = async (params) => {
+  const org = api.orgId();
+  const list = await api.reportList(org);
+  if (!list.length) return reportsStub();
+  if (params[0] && !list.includes(params[0])) return { redirect: '#/reports' }; // отчёта у этой организации нет
+  const tab = params[0] || list[0];
+  try {
+    if (tab === 'projects') return await (params[1] ? projectCard(org, params[1]) : projectList(org, list));
+    const rep = await cached(`rep:${org}:${tab}`, 60e3, () => api.report(org, tab));
+    const body = tab === 'dds' ? ddsReport(rep) : tab === 'plan' ? planFact(rep) : debtorsReport(rep);
+    return {
+      key: 'reports', tab: 'reports', depth: 1, nav: true, title: 'Отчёты',
+      html: `<div class="scroll">
+        ${reportsHead(list, tab, `<span class="period-chip">${tab === 'debtors' ? 'на сегодня' : H(rep.period || '')}</span>`)}
+        <div class="rep-body">${body}</div>
+      </div>`,
+    };
+  } catch (e) {
+    return reportGone(e, org, tab);
+  }
 };
+
+// ======================================================================
+// ПРОЕКТЫ (отчёт 7.4) И ОТЧЁТ ПО ПРОЕКТУ (7.5)
+// ======================================================================
+// Отборы, сортировку и итоги считает сервер: экран передаёт параметры и показывает ответ. Поиска нет.
+const PRJ_DEFAULT = { period: 'ytd', from: '', to: '', status: '', debtOnly: false, withoutId: false, sort: 'date' };
+const PRJ_PAGE = 50;
+const PRJ_PERIODS = [['month', 'Этот месяц'], ['prev', 'Прошлый месяц'], ['quarter', 'Квартал'], ['ytd', 'С начала года'], ['custom', 'Свой…']];
+const PRJ_SORTS = [['date', 'Дата заказа — сначала новые', 'По дате заказа'], ['debt', 'Долг — сначала большие', 'По долгу'],
+  ['margin', 'Маржа — сначала большая', 'По марже'], ['revenue', 'Стоимость — сначала большие', 'По стоимости']];
+const PROJECT_FORMS = ['проект', 'проекта', 'проектов'];
+ui.prj = { ...PRJ_DEFAULT };
+let prjData = null; // загруженные страницы списка: { key, at, dto } — возврат из карточки и «Показать ещё» без повторной загрузки
+
+// Период отбора → from / to. «С начала года» — без параметров: границы по времени компании ставит сервер.
+function prjRange(f) {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = now.getMonth();
+  if (f.period === 'month') return { from: iso(new Date(y, m, 1)), to: iso(now) };
+  if (f.period === 'prev') return { from: iso(new Date(y, m - 1, 1)), to: iso(new Date(y, m, 0)) };
+  if (f.period === 'quarter') return { from: iso(new Date(y, m - (m % 3), 1)), to: iso(now) };
+  if (f.period === 'custom') return { from: f.from, to: f.to };
+  return {};
+}
+const prjQuery = (f, cursor) => ({ ...prjRange(f), status: f.status || null, debtOnly: f.debtOnly, withoutId: f.withoutId, sort: f.sort, limit: PRJ_PAGE, cursor });
+const prjKey = (org, f) => JSON.stringify([org, prjRange(f), f.status, f.debtOnly, f.withoutId, f.sort]);
+const prjFiltered = (f) => !!(f.status || f.debtOnly || f.withoutId || f.period !== 'ytd');
+
+const pctText = (n) => `${n < 0 ? '−' : ''}${String(Math.round(Math.abs(n) * 10) / 10).replace('.', ',')}%`;
+const dmy = (s) => `${dayMonth(D(s))} ${String(s).slice(0, 4)}`;
+const ddmmyy = (s) => `${String(s).slice(8, 10)}.${String(s).slice(5, 7)}.${String(s).slice(2, 4)}`;
+function prjPeriodLabel(d) {
+  if (!d.from || !d.to) return 'Период';
+  const a = D(d.from);
+  const b = D(d.to);
+  const sameYear = a.getFullYear() === b.getFullYear();
+  return `${dayMonthShort(a)}${sameYear ? '' : ` ${a.getFullYear()}`} — ${dayMonthShort(b)} ${b.getFullYear()}`;
+}
+const prjStatusTag = (p) => (p.status === 'done' ? '<span class="tag tag-pos">Выполнен</span>'
+  : p.status === 'in_work' ? '<span class="tag tag-work">В работе</span>' : p.status ? `<span class="tag">${H(p.status)}</span>` : '');
+
+function prjRow(p) {
+  const due = p.paid + p.debt;
+  const paidPct = due > 0 ? Math.max(0, Math.min(100, Math.round((p.paid / due) * 100))) : 100;
+  return `<button class="prj ${p.withoutId ? 'noid' : ''}" data-go="#/reports/projects/${encodeURIComponent(p.id)}" data-prj="${H(p.id)}">
+    <span class="prj-top"><span class="prj-id">${p.withoutId ? `Реализация № ${H(p.saleNumber || '—')}` : H(p.projectId || '—')}</span>${p.withoutId ? '<span class="tag tag-warn">Без ID</span>' : prjStatusTag(p)}${p.orderDate ? `<span class="prj-date">заказ ${ddmmyy(p.orderDate)}</span>` : ''}</span>
+    <span class="prj-main"><b class="prj-who">${H(p.customer)}</b><b class="prj-amt">${moneyShort(p.revenue)}</b></span>
+    ${p.description ? `<span class="prj-desc">${H(p.description)}</span>` : ''}
+    <span class="prj-bar"><i style="width:${paidPct}%"></i></span>
+    <span class="prj-foot">
+      <span>Маржа <b class="${p.margin < 0 ? 'neg' : ''}">${moneyShort(p.margin)}</b> · ${pctText(p.marginPct)}</span>
+      ${p.debt > 0 ? `<span class="prj-debt">Долг <b>${moneyShort(p.debt)}</b></span>` : '<span class="pos">Оплачен полностью</span>'}
+    </span>
+  </button>`;
+}
+
+function prjTotals(t, inWork) {
+  const expW = t.revenue > 0 ? Math.max(0, Math.min(100, Math.round((t.costs / t.revenue) * 100))) : 0;
+  return `<div class="prj-totals" data-prj-totals>
+    <div class="pt-top"><small>${t.count} ${plural(t.count, PROJECT_FORMS)}${inWork ? ` · ${inWork}` : ''}${t.withoutId ? ` · ${t.withoutId} без ID` : ''}</small><small>без НДС</small></div>
+    <div class="pt-big">${digits(t.revenue)} <span>₸</span></div>
+    <div class="pt-bar"><i class="exp" style="width:${expW}%"></i><i class="mar" style="width:${100 - expW}%"></i></div>
+    <div class="pt-grid">
+      <div><small>Расходы</small><b>${moneyShort(t.costs)}</b></div>
+      <div><small>Маржа · ${pctText(t.marginPct)}</small><b>${moneyShort(t.margin)}</b></div>
+    </div>
+    <div class="pt-sep"></div>
+    <div class="pt-grid">
+      <div><small>Оплачено, с НДС</small><b>${moneyShort(t.paid)}</b></div>
+      <div class="pt-debt"><small>Долг, с НДС</small><b>${moneyShort(t.debt)}</b></div>
+    </div>
+  </div>`;
+}
+
+async function projectList(org, list) {
+  const f = ui.prj;
+  const key = prjKey(org, f);
+  if (!prjData || prjData.key !== key || Date.now() - prjData.at > 60e3) {
+    let dto;
+    try {
+      dto = await api.projects(org, prjQuery(f));
+    } catch (e) {
+      // 422: период не приняли (длиннее трёх лет, даты перепутаны) — возвращаем отбор по умолчанию и говорим почему
+      if (e instanceof ApiError && e.code === 'validation_error' && f.period !== 'ytd') {
+        ui.prj = { ...f, period: 'ytd', from: '', to: '' };
+        setTimeout(() => toast('Период не подошёл: не длиннее трёх лет. Показан текущий год.', 'error'), 60);
+        return projectList(org, list);
+      }
+      throw e;
+    }
+    prjData = { key, at: Date.now(), dto };
+  }
+  const d = prjData.dto;
+  const items = d.items;
+  const t = d.totals;
+  const chip = (k, v, label) => `<button class="chip ${String(f[k]) === String(v) ? 'on' : ''}" data-act="prj-chip" data-k="${k}" data-v="${v}">${label}</button>`;
+  const sortLabel = (PRJ_SORTS.find((s) => s[0] === f.sort) || PRJ_SORTS[0])[2];
+  let rows = '';
+  let noIdShown = false;
+  items.forEach((p) => {
+    if (p.withoutId && !noIdShown) {
+      noIdShown = true;
+      rows += `<div class="prj-group" data-prj-noid><b>Без ID заявки</b><span>Бухгалтеру: допишите ID в комментарий реализации</span></div>`;
+    }
+    rows += prjRow(p);
+  });
+  const left = t.count - items.length;
+  const body = items.length
+    ? `${rows}${d.nextCursor ? `<button class="btn btn-secondary btn-block prj-more" data-act="prj-more">Показать ещё${left > 0 ? ` ${Math.min(PRJ_PAGE, left)}` : ''}</button>` : ''}`
+    : `<div class="empty" data-prj-empty>
+        <span class="empty-ic">${I.file}</span>
+        <b>${prjFiltered(f) ? 'Проектов не найдено' : 'Проектов пока нет'}</b>
+        <span>${prjFiltered(f) ? 'Под эти отборы не попал ни один проект. Измените период или отборы.' : 'Они появятся, когда в 1С проведут реализации с ID заявки.'}</span>
+        ${prjFiltered(f) ? '<button class="btn btn-secondary" data-act="prj-reset">Сбросить отборы</button>' : ''}
+      </div>`;
+  return {
+    key: 'reports', tab: 'reports', depth: 1, nav: true, title: 'Проекты',
+    html: `<div class="scroll">
+      ${reportsHead(list, 'projects', `<button class="period-chip" data-act="prj-filters" data-prj-period>${prjPeriodLabel(d)}${I.chevD}</button>`)}
+      ${prjTotals(t)}
+      <div class="chips prj-chips">
+        ${chip('status', '', 'Все')}${chip('status', 'in_work', 'В работе')}${chip('status', 'done', 'Выполнен')}
+        <button class="chip ${f.debtOnly ? 'on' : ''}" data-act="prj-chip" data-k="debtOnly">Есть долг</button>
+        <button class="chip ${f.withoutId ? 'on' : ''}" data-act="prj-chip" data-k="withoutId">Без ID</button>
+      </div>
+      <div class="prj-sum"><span><b>${t.count}</b> ${plural(t.count, PROJECT_FORMS)}</span><button class="link-btn" data-act="prj-filters">${I.sort}${sortLabel}</button></div>
+      <div class="prj-list">${body}</div>
+      ${d.moneyNote ? `<p class="foot-note prj-note">${I.info}<span>${H(d.moneyNote)}</span></p>` : ''}
+      ${d.updatedAt ? `<p class="foot-note prj-stamp">${I.refresh}<span>Данные 1С на ${dayMonth(D(d.updatedAt))}, ${String(d.updatedAt).slice(11, 16)}</span></p>` : ''}
+    </div>`,
+  };
+}
+
+// Чипы над списком: статус — один из трёх; «Есть долг» и «Без ID» — переключатели, сочетаются со статусом.
+actions['prj-chip'] = (t) => {
+  const k = t.dataset.k;
+  ui.prj = { ...ui.prj, [k]: k === 'status' ? t.dataset.v : !ui.prj[k] };
+  nav.rerender();
+};
+
+actions['prj-reset'] = () => {
+  ui.prj = { ...PRJ_DEFAULT };
+  closeSheet();
+  nav.rerender();
+};
+
+// «Показать ещё»: следующая порция того же отбора дописывается к загруженным строкам.
+actions['prj-more'] = async (b) => {
+  const cur = prjData;
+  if (!cur || !cur.dto.nextCursor || b.classList.contains('loading')) return;
+  const label = b.innerHTML;
+  b.classList.add('loading');
+  b.innerHTML = `${spinner}Загружаем…`;
+  try {
+    const next = await api.projects(api.orgId(), prjQuery(ui.prj, cur.dto.nextCursor));
+    if (prjData !== cur) return; // пока грузили, отбор сменили
+    cur.dto = { ...cur.dto, items: [...cur.dto.items, ...next.items], nextCursor: next.nextCursor };
+    cur.at = Date.now();
+    nav.rerender();
+  } catch (e) {
+    b.classList.remove('loading');
+    b.innerHTML = label;
+    if (e instanceof ApiError && e.code === 'report_unavailable') {
+      nav.rerender(); // экран сам перечитает список отчётов
+      return;
+    }
+    actionError(e);
+  }
+};
+
+// Шторка «Отборы и сортировка»: черновик отбора, применяется кнопкой «Показать».
+let prjDraft = null;
+function prjSheet() {
+  const f = prjDraft;
+  const opt = (k, v, label) => `<button class="chip ${String(f[k]) === String(v) ? 'on' : ''}" data-act="prj-draft" data-k="${k}" data-v="${v}">${label}</button>`;
+  return `<div class="sheet-title">Отборы и сортировка</div>
+    <p class="sheet-label">Период — по дате реализаций</p>
+    <div class="chips prj-wrap" data-group="period">${PRJ_PERIODS.map(([v, l]) => opt('period', v, l)).join('')}</div>
+    <div class="prj-dates" data-prj-dates ${f.period === 'custom' ? '' : 'hidden'}>
+      <label>с<input type="date" class="prj-date-in" data-prj-from value="${H(f.from)}"></label>
+      <label>по<input type="date" class="prj-date-in" data-prj-to value="${H(f.to)}"></label>
+    </div>
+    <div class="field-err" data-prj-err hidden>${I.alert}<span></span></div>
+    <p class="sheet-label">Статус</p>
+    <div class="chips prj-wrap" data-group="status">${opt('status', '', 'Все')}${opt('status', 'in_work', 'В работе')}${opt('status', 'done', 'Выполнен')}</div>
+    <button class="prj-switch" data-act="prj-draft" data-k="debtOnly" role="switch" aria-checked="${f.debtOnly}"><span>Только с долгом</span><span class="switch ${f.debtOnly ? 'on' : ''}"><i></i></span></button>
+    <p class="sheet-label">Сортировка</p>
+    <div data-group="sort">${PRJ_SORTS.map(([v, l]) => `<button class="prj-radio ${f.sort === v ? 'on' : ''}" data-act="prj-draft" data-k="sort" data-v="${v}"><i></i>${l}</button>`).join('')}</div>
+    <div class="sheet-actions">
+      <button class="btn btn-primary btn-block" data-act="prj-apply">Показать</button>
+      <button class="btn btn-text btn-block" data-act="prj-reset">Сбросить</button>
+    </div>`;
+}
+
+actions['prj-filters'] = () => {
+  prjDraft = { ...ui.prj };
+  openSheet(prjSheet());
+};
+
+// Нажатие в шторке меняет только черновик и подсветку — запросов нет, пока не нажали «Показать».
+actions['prj-draft'] = (t) => {
+  if (!prjDraft) return;
+  const k = t.dataset.k;
+  const wrap = t.closest('.sheet-body');
+  if (k === 'debtOnly') {
+    prjDraft.debtOnly = !prjDraft.debtOnly;
+    t.setAttribute('aria-checked', prjDraft.debtOnly);
+    t.querySelector('.switch').classList.toggle('on', prjDraft.debtOnly);
+    return;
+  }
+  prjDraft[k] = t.dataset.v;
+  t.parentElement.querySelectorAll('[data-act="prj-draft"]').forEach((x) => x.classList.toggle('on', x === t));
+  if (k === 'period') {
+    wrap.querySelector('[data-prj-dates]').hidden = prjDraft.period !== 'custom';
+    wrap.querySelector('[data-prj-err]').hidden = true;
+  }
+};
+
+actions['prj-apply'] = (t) => {
+  if (!prjDraft) return;
+  const wrap = t.closest('.sheet-body');
+  if (prjDraft.period === 'custom') {
+    const from = wrap.querySelector('[data-prj-from]').value;
+    const to = wrap.querySelector('[data-prj-to]').value;
+    const err = wrap.querySelector('[data-prj-err]');
+    const say = (text) => {
+      err.hidden = false;
+      err.querySelector('span').textContent = text;
+    };
+    if (!from || !to) return say('Укажите обе даты периода');
+    if (from > to) return say('Дата «с» позже даты «по»');
+    if (diffDays(D(to), D(from)) > 366 * 3) return say('Период — не длиннее трёх лет');
+    prjDraft.from = from;
+    prjDraft.to = to;
+  }
+  ui.prj = { ...prjDraft };
+  prjDraft = null;
+  closeSheet();
+  nav.rerender();
+};
+
+// ---------- отчёт по проекту ----------
+const PT_SHOW = 10; // строк таблицы до «Показать все»
+const ptRow = (title, amount, sub, tag = '', note = '', extra = false) => `<div class="pt-row ${extra ? 'more' : ''}" ${extra ? 'hidden' : ''}>
+    <div class="pt-row-top"><span class="pt-name">${H(title)}</span><b class="pt-row-sum">${money(amount)}</b></div>
+    <div class="pt-row-sub"><span>${sub}</span>${tag}</div>
+    ${note ? `<div class="pt-note">${H(note)}</div>` : ''}
+  </div>`;
+
+// Таблица карточки: свёрнута, в заголовке число строк и сумма; раскрывается на месте, без запроса.
+function ptTable(id, title, rows, total, empty) {
+  if (!rows || !rows.length) {
+    return `<section class="pt" data-pt="${id}"><div class="pt-head"><h2>${title}</h2></div><div class="pt-body"><div class="pt-empty">${I.info}<span>${empty}</span></div></div></section>`;
+  }
+  const more = rows.length - PT_SHOW;
+  return `<section class="pt" data-pt="${id}">
+    <button class="pt-head" data-act="pt-toggle" aria-expanded="false"><h2>${title}</h2><span class="pt-count">${rows.length}</span><b class="pt-sum">${money(total)}</b>${I.chevD}</button>
+    <div class="pt-body" hidden>${rows.join('')}${more > 0 ? `<button class="pt-more" data-act="pt-more">Показать все ${rows.length}</button>` : ''}</div>
+  </section>`;
+}
+
+actions['pt-toggle'] = (t) => {
+  const body = t.parentElement.querySelector('.pt-body');
+  body.hidden = !body.hidden;
+  t.setAttribute('aria-expanded', String(!body.hidden));
+  t.classList.toggle('open', !body.hidden);
+};
+
+actions['pt-more'] = (t) => {
+  t.parentElement.querySelectorAll('.pt-row.more').forEach((r) => {
+    r.hidden = false;
+  });
+  t.remove();
+};
+
+const LINK_NAMES = { by_id: 'по ID', manual: 'вручную', by_rule: 'по правилу' };
+
+async function projectCard(org, id) {
+  let c;
+  try {
+    c = await api.project(org, id);
+  } catch (e) {
+    if (e instanceof ApiError && e.code === 'not_found') {
+      prjData = null; // проекта больше нет (или сменился его идентификатор) — список перечитается
+      return {
+        key: `prj:${id}`, depth: 2, title: 'Проект',
+        html: `${topbar('Проект', '#/reports/projects')}<div class="scroll has-topbar"><div class="empty" data-prj-missing><span class="empty-ic">${I.info}</span><b>Проект не найден</b><span>Возможно, его удалили в 1С или он относится к другой организации</span><button class="btn btn-secondary" data-go="#/reports/projects">К списку проектов</button></div></div>`,
+      };
+    }
+    throw e;
+  }
+  const expW = c.revenue > 0 ? Math.max(0, Math.min(100, Math.round((c.costs / c.revenue) * 100))) : 0;
+  const due = c.paid + c.debt;
+  const paidW = due > 0 ? Math.max(0, Math.min(100, Math.round((c.paid / due) * 100))) : 100;
+  const posted = (x) => (x.posted ? '' : ' · не проведена');
+  const sales = c.sales.map((r, i) => ptRow(r.service || 'Реализация', r.amount, `${dayMonth(D(r.date))}${r.number ? ` · № ${H(r.number)}` : ''}${r.account ? ` · счёт ${H(r.account)}` : ''}${posted(r)}`,
+    `<span class="tag ${r.kind === 'income' ? 'tag-pos' : ''}">${r.kind === 'income' ? 'доход' : r.kind === 'expense' ? 'расход' : H(r.kind)}</span>`, '', i >= PT_SHOW));
+  const purchases = c.purchases && c.purchases.map((r, i) => ptRow(r.supplier || 'Поступление', r.amount, `${dayMonth(D(r.date))}${r.number ? ` · № ${H(r.number)}` : ''}${posted(r)}`, '', r.note, i >= PT_SHOW));
+  const payments = c.payments.map((r, i) => ptRow(r.comment || r.article || 'Оплата', r.amount, [dayMonth(D(r.date)), H(r.article), H(r.account)].filter(Boolean).join(' · '),
+    r.link ? `<span class="tag">${LINK_NAMES[r.link] || H(r.link)}</span>` : '', r.note, i >= PT_SHOW));
+  const title = c.withoutId ? `Реализация № ${H(c.saleNumber || '')}` : `Проект ${H(c.projectId || '')}`;
+  const statusChip = c.withoutId ? '<span class="status-chip st-wait">Без ID заявки</span>'
+    : c.status === 'done' ? '<span class="status-chip st-ok">Выполнен</span>'
+      : c.status === 'in_work' ? '<span class="status-chip st-lav">В работе</span>' : c.status ? `<span class="status-chip">${H(c.status)}</span>` : '';
+  return {
+    key: `prj:${id}`, depth: 2, title,
+    html: `${topbar(title, '#/reports/projects')}
+    <div class="scroll has-topbar" data-project="${H(c.id)}">
+      <section class="req-hero">
+        ${statusChip}
+        <div class="rh-who">${H(c.customer)}</div>
+        ${c.description ? `<div class="rh-purpose">${H(c.description)}</div>` : ''}
+        <div class="rh-sum">${bigMoney(c.revenue)}</div>
+        <div class="prj-cap">Стоимость проекта, без НДС</div>
+      </section>
+      ${c.hint ? `<div class="over-note" data-prj-hint>${I.alert}<div><b>В реализации нет ID заявки</b><span>${H(c.hint)}</span></div></div>` : ''}
+      <section class="card" data-prj-margin>
+        <div class="card-head"><h2>Маржа</h2><span class="muted">рентабельность ${pctText(c.marginPct)}</span></div>
+        <div class="prj-split"><i class="exp" style="width:${expW}%"></i><i class="${c.margin < 0 ? 'loss' : 'mar'}" style="width:${100 - expW}%"></i></div>
+        <div class="prj-legend">
+          <span><i class="sw sw-ink"></i>Расходы<b>${money(c.costs)}</b></span>
+          <span><i class="sw sw-in"></i>Маржа<b class="${c.margin < 0 ? 'neg' : ''}">${money(c.margin)}</b></span>
+        </div>
+      </section>
+      <section class="card" data-prj-pay>
+        <div class="card-head"><h2>Оплата заказчика</h2><span class="muted">с НДС</span></div>
+        <div class="prj-split"><i class="mar" style="width:${paidW}%"></i></div>
+        <div class="prj-legend">
+          <span><i class="sw sw-in"></i>Оплачено<b>${money(c.paid)}</b></span>
+          <span><i class="sw sw-track"></i>Долг<b class="${c.debt > 0 ? 'warn-text' : ''}">${money(c.debt)}</b></span>
+        </div>
+      </section>
+      <section class="card kv">
+        ${c.withoutId ? `<div class="kv-row"><span>Реализация</span><b>№ ${H(c.saleNumber || '—')}</b></div>` : `<div class="kv-row"><span>ID заявки</span><b>${H(c.projectId || '—')}</b></div>`}
+        <div class="kv-row"><span>Дата заказа</span><b>${c.orderDate ? dmy(c.orderDate) : '—'}</b></div>
+        <div class="kv-row"><span>Ответственный</span><b>${H(c.manager || '—')}</b></div>
+        <div class="kv-row"><span>Категория</span><b>${H(c.category || '—')}</b></div>
+        <div class="kv-row"><span>Дата закрытия</span><b>${c.closedDate ? dmy(c.closedDate) : '—'}</b></div>
+        <div class="kv-row"><span>Реализаций</span><b>${c.salesCount}</b></div>
+      </section>
+      ${ptTable('sales', 'Реализации', sales, sum(c.sales, (r) => r.amount), 'Реализаций нет.')}
+      ${c.purchases === null ? ptTable('purchases', 'Поступления по ID', null, 0, 'Без ID заявки поступления не подбираются.')
+    : ptTable('purchases', 'Поступления по ID', purchases, c.purchasesTotal != null ? c.purchasesTotal : sum(c.purchases, (r) => r.amount), 'Поступлений с этим ID нет.')}
+      ${ptTable('payments', 'Оплаты поставщикам', payments, c.paymentsTotal != null ? c.paymentsTotal : sum(c.payments, (r) => r.amount), 'Оплат, отнесённых к проекту, нет.')}
+      ${c.truncated ? `<p class="prj-hint" data-prj-truncated>${I.info}<span>Показаны не все строки таблиц. Полностью — в 1С.</span></p>` : ''}
+      ${c.unassigned ? `<p class="prj-hint" data-prj-unassigned>${I.info}<span>${c.unassigned} ${plural(c.unassigned, ['документ', 'документа', 'документов'])} с несколькими ID без сумм в отчёт не ${c.unassigned === 1 ? 'попал' : 'попали'} — их нужно разнести в 1С вручную.</span></p>` : ''}
+      ${c.moneyNote ? `<p class="foot-note prj-note">${I.info}<span>${H(c.moneyNote)}</span></p>` : ''}
+      ${c.updatedAt ? `<p class="foot-note prj-stamp">${I.refresh}<span>Данные 1С на ${dayMonth(D(c.updatedAt))}, ${String(c.updatedAt).slice(11, 16)}</span></p>` : ''}
+    </div>`,
+  };
+}
 
 actions['dds-sel'] = (t) => {
   ui.ddsSel = Number(t.dataset.i);

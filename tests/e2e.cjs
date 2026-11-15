@@ -352,6 +352,59 @@ async function runFlow(browser, name, opts, isPhone) {
   await noHScroll(page, 'Отчёты, должники');
   if (isPhone) await shot(page, '21-otchet-dolzhniki');
 
+  // --- проекты (у «Альфа Логистик» учёт по проектам включён: четвёртый пункт переключателя) ---
+  ok((await page.locator('.screen:not(.leaving) .seg-btn').allInnerTexts()).map((x) => norm(x).trim()).join(' · ') === 'ДДС · План-факт · Должники · Проекты', 'переключатель отчётов: ДДС · План-факт · Должники · Проекты');
+  await tap(page, '.seg-btn[data-go="#/reports/projects"]');
+  await page.waitForSelector('.screen:not(.leaving) [data-prj-totals]', { timeout: 6000 });
+  await settle(page, 400);
+  const prjTot = await page.locator('.screen:not(.leaving) [data-prj-totals]').innerText().then(norm);
+  ok(prjTot.includes('8 проектов') && prjTot.includes('1 без ID') && prjTot.includes('468 389 086') && prjTot.includes('96,2 млн'), 'проекты: итоги — 8 проектов, 1 без ID, стоимость и долг');
+  ok(await page.locator('.screen:not(.leaving) .prj').count() === 8 && await page.locator('.screen:not(.leaving) .prj').last().evaluate((e) => e.classList.contains('noid')), 'проекты: 8 строк, реализация без ID — последней');
+  await noHScroll(page, 'Проекты');
+  if (isPhone) await shot(page, '32-proekty-spisok');
+  await tap(page, '[data-act="prj-chip"][data-k="debtOnly"]');
+  await page.waitForFunction(() => document.querySelectorAll('.screen:not(.leaving) .prj').length === 7, null, { timeout: 6000 });
+  ok((await page.locator('.screen:not(.leaving) [data-prj-totals]').innerText().then(norm)).includes('7 проектов'), 'проекты: «Есть долг» — 7 проектов, итоги по отбору');
+  await tap(page, '[data-prj-period]');
+  await settle(page, 450);
+  ok((await page.locator('.sheet').innerText().then(norm)).includes('Период — по дате реализаций'), 'проекты: шторка «Отборы и сортировка»');
+  await noHScroll(page, 'Проекты, отборы');
+  if (isPhone) await shot(page, '33-proekty-otbory');
+  await page.locator('.sheet [data-act="prj-reset"]').click();
+  await page.waitForFunction(() => document.querySelectorAll('.screen:not(.leaving) .prj').length === 8, null, { timeout: 6000 });
+  await settle(page, 400);
+  await tap(page, '.prj[data-prj="prj_demo_7d4c"]');
+  await page.waitForSelector('.screen:not(.leaving) [data-project="prj_demo_7d4c"]', { timeout: 6000 });
+  await settle(page, 500);
+  const prjCard = await page.locator('.screen:not(.leaving) .scroll').innerText().then(norm);
+  ok(prjCard.includes('ТОО «Бирлик Трейд»') && prjCard.includes('42 085 759') && prjCard.includes('Оплата заказчика') && prjCard.includes('Оплаты поставщикам'), 'отчёт по проекту PS-2026-04: стоимость, оплата заказчика, оплаты поставщикам');
+  await noHScroll(page, 'Проект');
+  if (isPhone) await shot(page, '34-proekt-kartochka');
+  await tap(page, '[data-pt="sales"] .pt-head');
+  await tap(page, '[data-pt="payments"] .pt-head');
+  await settle(page, 300);
+  ok(await page.locator('.screen:not(.leaving) [data-pt="sales"] .pt-row').count() === 8 && (await page.locator('.screen:not(.leaving) [data-pt="sales"] .pt-body').innerText().then(norm)).includes('счёт 1274'), 'проект: таблица «Реализации» раскрыта — 8 строк, доход и расход');
+  await scrollTo(page, '[data-pt="sales"]');
+  await noHScroll(page, 'Проект, таблицы');
+  if (isPhone) await shot(page, '35-proekt-tablicy');
+  await tap(page, '.topbar [data-back]');
+  await page.waitForSelector('.screen:not(.leaving) [data-prj-totals]', { timeout: 6000 });
+  await settle(page, 400);
+  await tap(page, '.prj.noid');
+  await page.waitForSelector('.screen:not(.leaving) [data-project="prj_demo_b188"]', { timeout: 6000 });
+  await settle(page, 500);
+  ok((await page.locator('.screen:not(.leaving) [data-prj-hint]').innerText().then(norm)).includes('нет ID заявки'), 'реализация без ID: подсказка бухгалтеру');
+  if (isPhone) await shot(page, '36-proekt-bez-id');
+  await tap(page, '.topbar [data-back]');
+  await page.waitForSelector('.screen:not(.leaving) [data-prj-totals]', { timeout: 6000 });
+  await settle(page, 400);
+  await tap(page, '.prj[data-prj="prj_demo_4a1f"]');
+  await page.waitForSelector('.screen:not(.leaving) [data-project="prj_demo_4a1f"]', { timeout: 6000 });
+  ok((await page.locator('.screen:not(.leaving) .tb-title').innerText().then(norm)) === 'Проект PS-2026-01', 'карточка любого проекта демо открывается');
+  await tap(page, '.topbar [data-back]');
+  await page.waitForSelector('.screen:not(.leaving) [data-prj-totals]', { timeout: 6000 });
+  await settle(page, 300);
+
   // --- уведомления ---
   await tab(page, '#/home');
   await settle(page);
@@ -403,6 +456,12 @@ async function runFlow(browser, name, opts, isPhone) {
   await settle(page);
   ok((await page.locator('.org-pill-name').innerText().then(norm)) === 'Север Трейд', 'переключение организации из профиля');
   ok(await page.locator('.screen:not(.leaving) .calm-card').isVisible(), 'у «Север Трейд» нет разрывов — спокойная плашка');
+  // у «Север Трейд» учёта по проектам нет — на вкладке три отчёта
+  await tab(page, '#/reports');
+  await settle(page);
+  ok((await page.locator('.screen:not(.leaving) .seg-btn').allInnerTexts()).map((x) => norm(x).trim()).join(' · ') === 'ДДС · План-факт · Должники', '«Север Трейд»: на вкладке «Отчёты» три отчёта, «Проектов» нет');
+  await tab(page, '#/home');
+  await settle(page);
   // заявка с двумя статьями: превышение — по доле основной статьи, а не по всей сумме заявки
   ok((await homeCount(page)) === 'На согласовании: 3' && (await page.locator('.screen:not(.leaving) .appr-body').innerText().then(norm)).includes('1 сверх лимита'), '«Север Трейд»: 3 заявки, одна сверх лимита');
   await page.evaluate(() => { location.hash = '#/requests/r203'; });

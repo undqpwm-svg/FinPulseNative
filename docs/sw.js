@@ -1,8 +1,8 @@
 // Сервис-воркер: оболочка приложения (сначала сеть, без сети — кэш) и push-уведомления.
 // Ответы API (api.smartsol.pro) НЕ кэшируются и не проходят через кэш: данные клиента не оседают на устройстве.
-const CACHE = 'finpuls-v13';
+const CACHE = 'finpuls-v14';
 const SHELL = [
-  './', './index.html', './css/app.css', './manifest.webmanifest', './data/demo.json',
+  './', './index.html', './css/app.css', './manifest.webmanifest', './data/demo.json', './data/projects.json',
   './js/app.js', './js/config.js', './js/screens.js', './js/store.js', './js/ui.js', './js/util.js', './js/icons.js', './js/push.js',
   './js/api/index.js', './js/api/core.js', './js/api/demo.js', './js/api/server.js',
   './icons/icon-192.png', './icons/apple-touch-icon.png',

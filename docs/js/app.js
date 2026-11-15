@@ -19,7 +19,7 @@ const TABS = [
   { id: 'profile', hash: '#/profile', label: 'Профиль', icon: I.user },
 ];
 const TAB_TITLES = { home: 'Главная', calendar: 'Календарь', requests: 'Заявки', reports: 'Отчёты', profile: 'Профиль' };
-const DETAIL_META = { notifications: ['Уведомления', '#/home'], orgs: ['Организации', '#/home'], requests: ['Заявка', '#/requests'] };
+const DETAIL_META = { notifications: ['Уведомления', '#/home'], orgs: ['Организации', '#/home'], requests: ['Заявка', '#/requests'], reports: ['Проект', '#/reports/projects'] };
 
 let current = null; // { key, el, depth, tab }
 let lastHash = null;
@@ -50,7 +50,8 @@ const replaceHash = (hash) => history.replaceState({ idx: histIdx() }, '', hash)
 
 // Метаданные экрана для ошибки: вкладка — с заголовком раздела и нижней навигацией, остальное — с «Назад».
 function errorMeta(r) {
-  if (TAB_TITLES[r.name] && !(r.name === 'requests' && r.params[0])) {
+  // карточка заявки и карточка проекта — экраны второго уровня: ошибка на них с «Назад», без нижней навигации
+  if (TAB_TITLES[r.name] && !(r.name === 'requests' && r.params[0]) && !(r.name === 'reports' && r.params[1])) {
     return { key: `error:${r.name}`, tab: r.name, title: TAB_TITLES[r.name] };
   }
   const [title, back_] = DETAIL_META[r.name] || ['ФинПульс', '#/home'];

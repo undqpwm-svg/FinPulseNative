@@ -155,11 +155,15 @@ export async function me() {
 export const orgId = () => S.state.orgId;
 export const setOrgId = (id) => S.setOrg(id);
 
+// Отчёты организации в демо: у всех — ДДС, План-факт и Должники; «Проекты» — только у первой (учёт по проектам
+// включают не все), чтобы было видно и вкладку с четырьмя пунктами, и с тремя.
+const demoReports = (o) => (o.id === S.data.orgs[0].id ? ['dds', 'plan', 'debtors', 'projects'] : ['dds', 'plan', 'debtors']);
+
 function orgDto(o) {
   const ds = S.days(o);
   const g = S.gap(o, ds);
   return {
-    id: o.id, name: o.name, short: o.short, initials: o.initials, city: o.city, activity: o.activity,
+    id: o.id, reports: demoReports(o), name: o.name, short: o.short, initials: o.initials, city: o.city, activity: o.activity,
     summary: { money: S.opening(o).total, pending: S.pending(o).length, gap: g ? { date: iso(g.day.date), deficit: g.deficit } : null },
   };
 }
@@ -331,6 +335,94 @@ export async function report(id, kind) {
     return { asOf: iso(S.today()), total: o.receivables.total, aging: { ...o.receivables.aging }, top, rest: o.receivables.total - sum(top, (d) => d.amount) };
   }
   return { period: rep.period, weeks: rep.dds };
+}
+
+export async function reportList(id) {
+  return demoReports(org(id));
+}
+
+// ---------- проекты (демо) ----------
+// Данные — data/projects.json: ответ списка и две карточки в формате API. Отборы, сортировка, итоги и порции
+// считаются здесь так же, как их считает сервер, — экран один и тот же.
+let prj = null;
+async function prjData() {
+  if (!prj) {
+    const res = await fetch('data/projects.json', { cache: 'no-cache' });
+    if (!res.ok) throw new ApiError('server_error', 'Не удалось загрузить демо-данные проектов');
+    prj = await res.json();
+  }
+  return prj;
+}
+
+const prjDto = (p) => ({
+  id: p.id, projectId: p.project_id || null, withoutId: !!p.without_id, saleNumber: p.sale_number || null,
+  orderDate: p.order_date, closedDate: p.closed_date || null, customer: p.customer, manager: p.manager || null,
+  description: p.description || '', category: p.category || null, status: p.status,
+  revenue: p.revenue, costs: p.costs, margin: p.margin, marginPct: p.margin_pct, paid: p.paid, debt: p.debt, salesCount: p.sales_count,
+});
+
+function unavailable(id) {
+  if (!demoReports(org(id)).includes('projects')) throw new ApiError('report_unavailable', 'Отчёт недоступен', { contractCode: 'report_unavailable' }, 403);
+}
+
+export async function projects(id, f = {}) {
+  await wait(250);
+  unavailable(id);
+  const d = (await prjData()).list;
+  let items = d.items.filter((p) => (!f.status || p.status === f.status) && (!f.debtOnly || p.debt > 0) && (!f.withoutId || p.without_id));
+  const by = { debt: (p) => p.debt, margin: (p) => p.margin, revenue: (p) => p.revenue }[f.sort];
+  items = [...items].sort((a, b) => Number(a.without_id) - Number(b.without_id) // без ID — последними при любой сортировке
+    || (by ? by(b) - by(a) : (a.order_date < b.order_date ? 1 : a.order_date > b.order_date ? -1 : 0)));
+  const revenue = sum(items, (p) => p.revenue);
+  const costs = sum(items, (p) => p.costs);
+  const limit = Math.max(1, Math.min(100, Number(f.limit) || 50));
+  const start = Number(f.cursor) || 0;
+  return {
+    updatedAt: d.updated_at, from: f.from || d.from, to: f.to || d.to, moneyNote: d.money_note,
+    totals: {
+      count: items.length, withoutId: items.filter((p) => p.without_id).length, revenue, costs, margin: revenue - costs,
+      marginPct: revenue ? Math.round(((revenue - costs) / revenue) * 1000) / 10 : 0, paid: sum(items, (p) => p.paid), debt: sum(items, (p) => p.debt),
+    },
+    items: items.slice(start, start + limit).map(prjDto),
+    nextCursor: start + limit < items.length ? String(start + limit) : null,
+  };
+}
+
+// Карточка: две есть в данных; остальные собираются из строки списка — реализации делят стоимость поровну.
+function cardFromRow(p, d) {
+  const n = Math.max(1, p.sales_count);
+  const sales = [];
+  for (let i = 0; i < n; i++) {
+    const dt = new Date(`${p.order_date}T00:00:00`);
+    dt.setMonth(dt.getMonth() + i + 1, 0);
+    const part = (total) => (i === n - 1 ? total - Math.floor(total / n) * (n - 1) : Math.floor(total / n));
+    const number = String(100 + ((p.revenue + i * 17) % 400));
+    sales.push({ date: iso(dt), number, posted: true, service: p.description, account: '6010', amount_net: part(p.margin), kind: 'income' });
+    sales.push({ date: iso(dt), number, posted: true, service: 'Перевыставленные расходы', account: '1274', amount_net: part(p.costs), kind: 'expense' });
+  }
+  return {
+    ...p, updated_at: d.updated_at, money_note: 'Стоимость, расходы и маржа — без НДС; оплачено и долг — с НДС. Тенге.',
+    finance: { revenue: p.revenue, costs: p.costs, margin: p.margin, margin_pct: p.margin_pct, paid: p.paid, debt: p.debt, purchases_total: 0, payments_total: 0 },
+    sales, purchases: [], payments: [], unassigned_count: 0, truncated: false, hint: null,
+  };
+}
+
+export async function project(id, projectId) {
+  await wait(250);
+  unavailable(id);
+  const d = await prjData();
+  const row = d.list.items.find((p) => p.id === projectId);
+  const r = d.cards[projectId] || (row && cardFromRow(row, d.list));
+  if (!r) throw new ApiError('not_found', 'Проект не найден', { contractCode: 'not_found' }, 404);
+  const f = r.finance;
+  return {
+    ...prjDto({ ...r, ...f }),
+    updatedAt: r.updated_at, purchasesTotal: f.purchases_total, paymentsTotal: f.payments_total,
+    sales: r.sales.map((x) => ({ date: x.date, number: x.number, posted: x.posted !== false, service: x.service, account: x.account, amount: x.amount_net, kind: x.kind })),
+    purchases: r.purchases == null ? null : r.purchases.map((x) => ({ date: x.date, number: x.number, supplier: x.supplier, amount: x.amount, posted: x.posted !== false, note: x.note || '' })),
+    payments: (r.payments || []).map((x) => ({ date: x.date, article: x.article, comment: x.comment || '', account: x.account, amount: x.amount, link: x.link, note: x.note || '' })),
+    unassigned: r.unassigned_count || 0, truncated: !!r.truncated, hint: r.hint || '', moneyNote: r.money_note || '',
+  };
 }
 
 // ---------- уведомления ----------

@@ -4,7 +4,7 @@
 // нейтральным текстом и кнопкой бота → poll: 202 pending, отказы → confirm: 200, code_invalid, code_not_sent,
 // challenge_rejected wrong_code/blocked, challenge_expired, too_many_requests, source_unavailable, обрыв связи);
 // ответ сервера прежней схемы (match_code) — понятная ошибка; тестовый сервер (?api=test); залпы одинаковых запросов;
-// заявка с двумя статьями;
+// заявка с двумя статьями; вкладка «Отчёты» по списку reports из /orgs; «Проекты» и «Отчёт по проекту» (7.4–7.5);
 // выбор организации (несколько, partial, 503 source_unavailable, одна); обновление токенов
 // (одно на все запросы, refresh_invalid, access_revoked); «1С недоступна»; решения (успех, already_decided,
 // not_awaiting_you, action_failed, обрыв связи и повтор с тем же Idempotency-Key); настройки; уведомления; push.
@@ -69,7 +69,11 @@ const TODAY = '2026-11-11';
 const day = (i) => new Date(Date.UTC(2026, 10, 11 + i)).toISOString().slice(0, 10);
 const T = (d, t) => `${d}T${t}:00+05:00`;
 const USER = { id: 'u_test', name: 'Тест Руководитель', first_name: 'Тест', initials: 'ТР', position: null, phone: '+77000000001' };
-const ORG = { id: 'org_test', name: 'ТОО «Тест»', short_name: 'Тест', initials: 'ТТ', city: null, activity: null, money_total: 5000000, pending_requests: 1, gap: null, updated_at: T(TODAY, '10:15') };
+const ORG = { id: 'org_test', reports: ['cash-flow', 'plan-fact', 'debtors'], name: 'ТОО «Тест»', short_name: 'Тест', initials: 'ТТ', city: null, activity: null, money_total: 5000000, pending_requests: 1, gap: null, updated_at: T(TODAY, '10:15') };
+// организация от сервера прежней версии (база до 1.16.2): поля reports нет совсем
+const ORG_OLD = (({ reports, ...rest }) => rest)(ORG);
+// демо-ответы отчёта «Проекты» в формате API (7.4–7.5): список и две карточки
+const PRJ = JSON.parse(fs.readFileSync(path.join(DOCS, 'data', 'projects.json'), 'utf8'));
 const ORG2 = { id: 'org_two', name: 'ТОО «Второй»', short_name: 'Второй', initials: 'ВТ', city: null, activity: null, money_total: 1200000, pending_requests: 0, gap: { date: '2026-11-13', shortage: 300000 }, updated_at: T(TODAY, '10:15') };
 
 function calDays() {
@@ -296,6 +300,33 @@ async function mockApi(page, ctl) {
     if (p === '/orgs/org_test/reports/cash-flow') return json(200, { updated_at: T(TODAY, '10:15'), month: '2026-10', title: 'Октябрь 2026', inflow: 24000000, outflow: 21650000, weeks: [{ label: '1–4', from: '2026-10-01', to: '2026-10-04', inflow: 9800000, outflow: 8450000 }, { label: '5–11', from: '2026-10-05', to: '2026-10-11', inflow: 14200000, outflow: 13200000 }] });
     if (p === '/orgs/org_test/reports/plan-fact') return json(200, { updated_at: T(TODAY, '10:15'), month: '2026-10', title: 'Октябрь 2026', has_plan: true, income: [{ article: 'Оплата от покупателей', plan: 72000000, fact: 68750000 }], expense: [{ article: 'Аренда', plan: 1800000, fact: 1900000 }, { article: 'Связь', plan: null, fact: 50000 }] });
     if (p === '/orgs/org_test/reports/debtors') return json(200, { updated_at: T(TODAY, '10:15'), date: TODAY, total: 3000000, aging: { days_0_30: 2000000, days_31_60: 500000, days_over_60: 500000 }, items: [{ counterparty: 'ТОО «Должник»', amount: 1200000, aging: { days_0_30: 200000, days_31_60: 500000, days_over_60: 500000 }, oldest_days: 74 }] });
+    // ---- отчёт «Проекты» (общий проход): отборы, сортировка, итоги и порции — как на сервере ----
+    if (p === '/orgs/org_test/reports/projects' || p.startsWith('/orgs/org_test/reports/projects/')) {
+      if (st.prj403) return err(403, 'report_unavailable', 'Отчёт недоступен');
+      if (p !== '/orgs/org_test/reports/projects') {
+        const c = PRJ.cards[decodeURIComponent(p.split('/').pop())];
+        return c ? json(200, c) : err(404, 'not_found', 'Проект не найден');
+      }
+      const q = url.searchParams;
+      if (st.prj422 && q.get('from')) return err(422, 'validation_error', 'Проверьте параметры запроса.', { fields: { from: 'Период — не длиннее 3 лет' } });
+      let items = st.prjMany
+        ? Array.from({ length: st.prjMany }, (_, i) => ({ ...PRJ.list.items[i % 4], id: `project_many_${i}`, project_id: `PS-2026-${1000 + i}`, status: 'in_work' }))
+        : PRJ.list.items;
+      if (st.prjEmpty) items = [];
+      const filtered = !!(q.get('status') || q.get('debt_only') || q.get('without_id') || st.prjMany || st.prjEmpty);
+      items = items.filter((x) => (!q.get('status') || x.status === q.get('status')) && (q.get('debt_only') !== 'true' || x.debt > 0) && (q.get('without_id') !== 'true' || x.without_id));
+      const by = { debt: (x) => x.debt, margin: (x) => x.margin, revenue: (x) => x.revenue }[q.get('sort')];
+      items = [...items].sort((a, b) => Number(a.without_id) - Number(b.without_id) || (by ? by(b) - by(a) : (a.order_date < b.order_date ? 1 : a.order_date > b.order_date ? -1 : 0)));
+      const sumOf = (f) => items.reduce((t, x) => t + f(x), 0);
+      const revenue = sumOf((x) => x.revenue);
+      const costs = sumOf((x) => x.costs);
+      const totals = filtered
+        ? { count: items.length, without_id: items.filter((x) => x.without_id).length, revenue, costs, margin: revenue - costs, margin_pct: revenue ? Math.round(((revenue - costs) / revenue) * 1000) / 10 : 0, paid: sumOf((x) => x.paid), debt: sumOf((x) => x.debt) }
+        : PRJ.list.totals;
+      const limit = Number(q.get('limit')) || 50;
+      const start = Number(q.get('cursor')) || 0;
+      return json(200, { ...PRJ.list, from: q.get('from') || PRJ.list.from, to: q.get('to') || PRJ.list.to, totals, items: items.slice(start, start + limit), next_cursor: start + limit < items.length ? String(start + limit) : null });
+    }
     return err(404, 'not_found', 'Не найдено');
   });
 }
@@ -826,6 +857,247 @@ const PUSH_STUB = () => {
       await ctx.close();
     }
 
+    // ---------- 1д. вкладка «Отчёты» по списку сервера ----------
+    console.log('\n▶ Вкладка «Отчёты» собирается из reports в /orgs');
+    {
+      // порядок — как прислал сервер; незнакомое имя пропускается
+      const { ctx, page, errors, ctl } = await newCtx(devices['iPhone 13'], { orgs: [{ ...ORG, reports: ['debtors', 'brand-new-report', 'cash-flow'] }] });
+      await page.goto(BASE);
+      await settle(page, 800);
+      await login(page, ctl);
+      ok((await page.locator('.screen:not(.leaving) [data-go="#/reports/debtors"]').count()) === 1, 'debtors есть в списке — «Нам должны» на главной ведёт в «Должники»');
+      await page.locator('.tabbar .tab[data-go="#/reports"]').click();
+      await settle(page, 900);
+      const segs = (await page.locator('.screen:not(.leaving) .seg-btn').allInnerTexts()).map((x) => norm(x).trim());
+      ok(JSON.stringify(segs) === JSON.stringify(['Должники', 'ДДС']), `переключатель — в порядке сервера, незнакомый отчёт пропущен (${segs.join(' · ')})`);
+      ok(norm(await page.locator('.screen:not(.leaving) .rep-body').innerText()).includes('ТОО «Должник»'), 'открыт первый отчёт списка — «Должники»');
+      await page.evaluate(() => { location.hash = '#/reports/plan'; });
+      await settle(page, 900);
+      ok((await page.evaluate(() => location.hash)) === '#/reports' && !ctl.calls.some((c) => c.path.endsWith('/reports/plan-fact')), 'отчёта нет в списке — адрес ведёт на первый отчёт, запрос не уходит');
+      noErrors(errors);
+      await ctx.close();
+    }
+    {
+      // поля reports нет (сервер прежней версии, база до 1.16.2) — заглушка, запросов отчётов нет
+      const { ctx, page, errors, ctl } = await newCtx(devices['iPhone 13'], { orgs: [ORG_OLD] });
+      await page.goto(BASE);
+      await settle(page, 800);
+      await login(page, ctl);
+      ok((await page.locator('.screen:not(.leaving) [data-go="#/reports/debtors"]').count()) === 0 && norm(await page.locator('.screen:not(.leaving) .rec-card').innerText()).includes('Долг по возрасту'), 'нет debtors в списке — «Нам должны» на главной без ссылки');
+      await page.locator('.tabbar .tab[data-go="#/reports"]').click();
+      await settle(page, 900);
+      const txt = norm(await page.locator('.screen:not(.leaving) .scroll').innerText());
+      ok(txt.includes('Раздел появится в следующей версии') && txt.includes('Сейчас в приложении — главная и согласование заявок.') && (await page.locator('.screen:not(.leaving) .seg').count()) === 0, 'списка отчётов нет — заглушка «Раздел появится в следующей версии»');
+      ok(!ctl.calls.some((c) => /\/reports\//.test(c.path)), 'запросы отчётов не уходят');
+      noErrors(errors);
+      await ctx.close();
+    }
+
+    // ---------- 1е. проекты ----------
+    console.log('\n▶ «Проекты» и «Отчёт по проекту» (общий проход: /orgs/{org}/reports/projects)');
+    {
+      const { ctx, page, errors, ctl } = await newCtx(devices['iPhone 13'], { orgs: [{ ...ORG, reports: ['projects'] }] });
+      const st = ctl.state;
+      const prjCalls = (from = 0) => ctl.calls.slice(from).filter((c) => c.method === 'GET' && c.path === '/orgs/org_test/reports/projects');
+      const last = () => prjCalls().slice(-1)[0];
+      const rows = () => page.locator('.screen:not(.leaving) .prj');
+      await page.goto(BASE);
+      await settle(page, 800);
+      await login(page, ctl);
+      ok((await page.locator('.screen:not(.leaving) [data-go="#/reports/debtors"]').count()) === 0, 'в списке только projects — «Нам должны» без ссылки');
+      await page.locator('.tabbar .tab[data-go="#/reports"]').click();
+      await page.waitForSelector('.screen:not(.leaving) [data-prj-totals]', { timeout: 8000 });
+      await settle(page, 500);
+      ok((await page.locator('.screen:not(.leaving) .seg').count()) === 0 && norm(await page.locator('.screen:not(.leaving) .page-over').innerText()) === 'Отчёты' && norm(await page.locator('.screen:not(.leaving) .page-title').innerText()) === 'Проекты', 'один отчёт — без переключателя: «Отчёты» / «Проекты»');
+      ok(prjCalls().length === 1 && JSON.stringify(last().query) === JSON.stringify({ limit: '50' }) && last().headers.authorization === 'Bearer at_1', 'GET /orgs/{org}/reports/projects?limit=50 — без from/to (период по умолчанию ставит сервер)');
+      const T0 = PRJ.list.totals;
+      const tot = norm(await page.locator('[data-prj-totals]').innerText());
+      ok(tot.includes('8 проектов') && tot.includes('1 без ID') && tot.includes('468 389 086') && tot.includes('325,8 млн') && tot.includes('142,6 млн') && tot.includes('30,4%') && tot.includes('420,4 млн') && tot.includes('96,2 млн'), `итоги — из totals ответа (${T0.count} проектов, стоимость ${T0.revenue})`);
+      ok((await rows().count()) === 8 && (await page.locator('.screen:not(.leaving) .prj.noid').count()) === 1, '8 строк, одна — без ID');
+      const noId = norm(await page.locator('.screen:not(.leaving) .prj.noid').innerText());
+      ok(noId.includes('Реализация № 412') && noId.includes('Без ID') && norm(await page.locator('[data-prj-noid]').innerText()).includes('допишите ID в комментарий реализации'), 'реализация без ID — последней, с номером, меткой и подсказкой бухгалтеру');
+      ok(await rows().last().evaluate((e) => e.classList.contains('noid')), 'без ID — в конце списка');
+      const r1 = norm(await page.locator('.prj[data-prj="prj_demo_7d4c"]').innerText());
+      ok(r1.includes('PS-2026-04') && r1.includes('В работе') && r1.includes('заказ 27.07.26') && r1.includes('ТОО «Бирлик Трейд»') && r1.includes('42,1 млн') && r1.includes('14,3 млн') && r1.includes('34%') && r1.includes('Долг 11,3 млн'), 'строка проекта: ID, статус, дата заказа, заказчик, стоимость, маржа и %, долг');
+      ok(norm(await page.locator('.prj[data-prj="prj_demo_9f6a"]').innerText()).includes('Оплачен полностью'), 'проект без долга — «Оплачен полностью»');
+      ok(norm(await page.locator('.screen:not(.leaving) .prj-note').innerText()).includes('Стоимость, расходы и маржа — без НДС; оплачено и долг — с НДС') && norm(await page.locator('.screen:not(.leaving) .prj-stamp').innerText()).includes('Данные 1С на 15 ноября, 10:20'), 'подписи про НДС и время данных — из ответа');
+      ok(norm(await page.locator('[data-prj-period]').innerText()).includes('1 янв — 30 ноя 2026'), 'плашка периода — из from/to ответа');
+      await shot(page, '14-proekty-spisok');
+
+      // отборы чипами — параметрами запроса, итоги и строки из нового ответа
+      await page.locator('.screen:not(.leaving) [data-act="prj-chip"][data-v="in_work"]').click();
+      await page.waitForFunction(() => document.querySelectorAll('.screen:not(.leaving) .prj').length === 4, null, { timeout: 8000 });
+      ok(last().query.status === 'in_work' && !last().query.debt_only && norm(await page.locator('[data-prj-totals]').innerText()).includes('4 проекта'), 'чип «В работе» → status=in_work; итоги по отбору');
+      await page.locator('.screen:not(.leaving) [data-act="prj-chip"][data-k="debtOnly"]').click();
+      await settle(page, 700);
+      ok(last().query.status === 'in_work' && last().query.debt_only === 'true', 'чип «Есть долг» → debt_only=true, сочетается со статусом');
+      await page.locator('.screen:not(.leaving) [data-act="prj-chip"][data-v=""]').click();
+      await settle(page, 500);
+      await page.locator('.screen:not(.leaving) [data-act="prj-chip"][data-k="debtOnly"]').click();
+      await settle(page, 500);
+      await page.locator('.screen:not(.leaving) [data-act="prj-chip"][data-k="withoutId"]').click();
+      await page.waitForFunction(() => document.querySelectorAll('.screen:not(.leaving) .prj').length === 1, null, { timeout: 8000 });
+      ok(last().query.without_id === 'true' && !last().query.status && !last().query.debt_only, 'чип «Без ID» → without_id=true');
+      await page.locator('.screen:not(.leaving) [data-act="prj-chip"][data-k="withoutId"]').click();
+      await settle(page, 600);
+
+      // шторка: период и сортировка — запрос только по «Показать»
+      const before = prjCalls().length;
+      await page.locator('[data-prj-period]').click();
+      await settle(page, 450);
+      ok(norm(await page.locator('.sheet').innerText()).includes('Период — по дате реализаций') && (await page.locator('.sheet input[type="search"], .sheet [data-search]').count()) === 0, 'шторка «Отборы и сортировка»: «Период — по дате реализаций», поиска нет');
+      await shot(page, '15-proekty-otbory');
+      await page.locator('.sheet [data-act="prj-draft"][data-k="sort"][data-v="debt"]').click();
+      await page.locator('.sheet [data-act="prj-draft"][data-k="period"][data-v="prev"]').click();
+      await page.locator('.sheet [data-act="prj-draft"][data-k="debtOnly"]').click();
+      await settle(page, 300);
+      ok(prjCalls().length === before, 'выбор в шторке запросов не шлёт');
+      await page.locator('.sheet [data-act="prj-apply"]').click();
+      await settle(page, 900);
+      ok(prjCalls().length === before + 1 && last().query.sort === 'debt' && last().query.from === '2026-10-01' && last().query.to === '2026-10-31' && last().query.debt_only === 'true', '«Показать» → один запрос: sort=debt, from/to прошлого месяца, debt_only=true');
+      ok(norm(await page.locator('.screen:not(.leaving) .prj-sum').innerText()).includes('По долгу'), 'подпись сортировки — «По долгу»');
+      // свой период: проверка до запроса
+      await page.locator('[data-prj-period]').click();
+      await settle(page, 400);
+      await page.locator('.sheet [data-act="prj-draft"][data-k="period"][data-v="custom"]').click();
+      await page.locator('.sheet [data-prj-from]').fill('2020-01-01');
+      await page.locator('.sheet [data-prj-to]').fill('2026-11-11');
+      const b2 = prjCalls().length;
+      await page.locator('.sheet [data-act="prj-apply"]').click();
+      await settle(page, 400);
+      ok(norm(await page.locator('.sheet [data-prj-err]').innerText()).includes('не длиннее трёх лет') && prjCalls().length === b2, 'свой период длиннее трёх лет — сообщение в шторке, запрос не уходит');
+      await page.locator('.sheet [data-prj-from]').fill('2026-07-01');
+      await page.locator('.sheet [data-prj-to]').fill('2026-09-30');
+      await page.locator('.sheet [data-act="prj-apply"]').click();
+      await settle(page, 900);
+      ok(last().query.from === '2026-07-01' && last().query.to === '2026-09-30', 'свой период → from/to как ввели');
+      // 422 от сервера на период — возврат к периоду по умолчанию с объяснением
+      st.prj422 = true;
+      await page.locator('[data-prj-period]').click();
+      await settle(page, 400);
+      await page.locator('.sheet [data-prj-from]').fill('2026-01-01');
+      await page.locator('.sheet [data-act="prj-apply"]').click();
+      await settle(page, 1100);
+      st.prj422 = false;
+      ok(norm(await page.locator('.toast').innerText()).includes('Период не подошёл') && !last().query.from && (await rows().count()) > 0, '422 на период — подсказка и список за период по умолчанию');
+      await page.locator('[data-prj-period]').click();
+      await settle(page, 400);
+      await page.locator('.sheet [data-act="prj-reset"]').click();
+      await settle(page, 900);
+      ok(JSON.stringify(last().query) === JSON.stringify({ limit: '50' }) && (await rows().count()) === 8, '«Сбросить» — отбор по умолчанию');
+
+      // пустой отбор
+      st.prjEmpty = true;
+      await page.locator('.screen:not(.leaving) [data-act="prj-chip"][data-v="done"]').click();
+      await page.waitForSelector('.screen:not(.leaving) [data-prj-empty]', { timeout: 8000 });
+      ok(norm(await page.locator('[data-prj-empty]').innerText()).includes('Проектов не найдено') && (await page.locator('[data-prj-empty] [data-act="prj-reset"]').count()) === 1, 'отбор ничего не нашёл — «Проектов не найдено» и «Сбросить отборы»');
+      st.prjEmpty = false;
+      await page.locator('[data-prj-empty] [data-act="prj-reset"]').click();
+      await page.waitForFunction(() => document.querySelectorAll('.screen:not(.leaving) .prj').length === 8, null, { timeout: 8000 });
+
+      // карточка проекта
+      const cardCalls = () => ctl.calls.filter((c) => c.method === 'GET' && c.path.startsWith('/orgs/org_test/reports/projects/'));
+      const listBefore = prjCalls().length;
+      await page.locator('.prj[data-prj="prj_demo_7d4c"]').click();
+      await page.waitForSelector('.screen:not(.leaving) [data-project="prj_demo_7d4c"]', { timeout: 8000 });
+      await settle(page, 600);
+      ok(cardCalls().length === 1 && cardCalls()[0].path === '/orgs/org_test/reports/projects/prj_demo_7d4c', 'GET /orgs/{org}/reports/projects/{id}');
+      ok((await page.evaluate(() => location.hash)) === '#/reports/projects/prj_demo_7d4c' && norm(await page.locator('.screen:not(.leaving) .tb-title').innerText()) === 'Проект PS-2026-04', 'экран «Проект PS-2026-04»');
+      const card = norm(await page.locator('.screen:not(.leaving) .scroll').innerText());
+      ok(card.includes('В работе') && card.includes('ТОО «Бирлик Трейд»') && card.includes('42 085 759') && card.includes('Стоимость проекта, без НДС'), 'шапка: статус, заказчик, стоимость без НДС');
+      const mar = norm(await page.locator('[data-prj-margin]').innerText());
+      const pay = norm(await page.locator('[data-prj-pay]').innerText());
+      ok(mar.includes('рентабельность 34%') && mar.includes('27 778 000 ₸') && mar.includes('14 307 759 ₸'), '«Маржа»: расходы 27 778 000, маржа 14 307 759, рентабельность 34%');
+      ok(pay.includes('Оплата заказчика') && pay.includes('с НДС') && pay.includes('37 540 000 ₸') && pay.includes('11 279 480 ₸'), '«Оплата заказчика»: оплачено и долг из ответа');
+      ok(card.includes('Сапарова Мадина') && card.includes('Таможня и брокеридж') && card.includes('27 июля 2026'), 'реквизиты: ответственный, категория, дата заказа');
+      ok(norm(await page.locator('[data-pt="sales"] .pt-head').innerText()).replace(/\s+/g, ' ').includes('Реализации 8 42 085 759 ₸') && norm(await page.locator('[data-pt="purchases"] .pt-head').innerText()).replace(/\s+/g, ' ').includes('Поступления по ID 3 20 030 000 ₸') && norm(await page.locator('[data-pt="payments"] .pt-head').innerText()).replace(/\s+/g, ' ').includes('Оплаты поставщикам 4 19 200 000 ₸'), 'три таблицы: число строк и суммы (расходы 27,8 млн и поступления 20,0 млн — разные числа)');
+      ok((await page.locator('[data-pt="sales"] .pt-body').isHidden()) && (await page.locator('[data-pt="payments"] .pt-body').isHidden()), 'таблицы свёрнуты');
+      await shot(page, '16-proekt-kartochka');
+      const callsBefore = ctl.calls.length;
+      await page.locator('[data-pt="sales"] .pt-head').click();
+      await page.locator('[data-pt="purchases"] .pt-head').click();
+      await page.locator('[data-pt="payments"] .pt-head').click();
+      await settle(page, 300);
+      const sales = norm(await page.locator('[data-pt="sales"] .pt-body').innerText());
+      ok(ctl.calls.length === callsBefore && (await page.locator('[data-pt="sales"] .pt-row').count()) === 8, 'таблицы раскрываются на месте, без запросов');
+      ok(sales.includes('доход') && sales.includes('расход') && sales.includes('счёт 6010') && sales.includes('счёт 1274') && sales.includes('31 июля · № 187') && sales.includes('6 740 000 ₸'), 'реализации: строки дохода (6010) и расхода (1274) со счётом, номером и суммой');
+      ok(norm(await page.locator('[data-pt="purchases"] .pt-body').innerText()).includes('ТОО «Ирбис Карго»') && norm(await page.locator('[data-pt="purchases"] .pt-body').innerText()).includes('доля 60 %'), 'поступления по ID: поставщик и примечание о доле');
+      const pays = norm(await page.locator('[data-pt="payments"] .pt-body').innerText());
+      ok(pays.includes('Оплата ЖТ-552 по PS-2026-04') && pays.includes('по ID') && pays.includes('вручную') && pays.includes('Аренда склада'), 'оплаты поставщикам: комментарий, статья, «по ID» / «вручную»');
+      ok(norm(await page.locator('[data-prj-unassigned]').innerText()).includes('1 документ с несколькими ID без сумм') && norm(await page.locator('[data-prj-unassigned]').innerText()).includes('разнести в 1С вручную'), 'unassigned_count → строка про документы, которые нужно разнести в 1С');
+      await page.evaluate(() => { const s = document.querySelector('.screen:not(.leaving) .scroll'); s.scrollTop = document.querySelector('[data-pt="sales"]').offsetTop - 12; });
+      await settle(page, 300);
+      await shot(page, '17-proekt-tablicy');
+      await page.locator('.screen:not(.leaving) .topbar [data-back]').click();
+      await page.waitForSelector('.screen:not(.leaving) [data-prj-totals]', { timeout: 8000 });
+      await settle(page, 500);
+      ok(prjCalls().length === listBefore && (await rows().count()) === 8, '«Назад» — к списку без повторного запроса');
+
+      // карточка без ID
+      await page.locator('.screen:not(.leaving) .prj.noid').click();
+      await page.waitForSelector('.screen:not(.leaving) [data-project="prj_demo_b188"]', { timeout: 8000 });
+      await settle(page, 500);
+      const nc = norm(await page.locator('.screen:not(.leaving) .scroll').innerText());
+      ok(norm(await page.locator('.screen:not(.leaving) .tb-title').innerText()) === 'Реализация № 412' && nc.includes('Без ID заявки') && norm(await page.locator('[data-prj-hint]').innerText()).includes('Бухгалтеру: дописать ID'), 'реализация без ID: заголовок с номером и подсказка из hint');
+      ok(nc.includes('Без ID заявки поступления не подбираются') && nc.includes('Оплат, отнесённых к проекту, нет'), 'purchases: null → «не подбираются»; оплат нет');
+      await shot(page, '18-proekt-bez-id');
+
+      // 404 — карточки больше нет
+      await page.evaluate(() => { location.hash = '#/reports/projects/project_gone'; });
+      await page.waitForSelector('.screen:not(.leaving) [data-prj-missing]', { timeout: 8000 });
+      ok(norm(await page.locator('[data-prj-missing]').innerText()).includes('Проект не найден'), '404 на карточке — «Проект не найден»');
+      const lb = prjCalls().length;
+      await page.locator('[data-prj-missing] [data-go="#/reports/projects"]').click();
+      await page.waitForSelector('.screen:not(.leaving) [data-prj-totals]', { timeout: 8000 });
+      await settle(page, 400);
+      ok(prjCalls().length === lb + 1, '«К списку проектов» — список перечитан');
+
+      // порции: 120 проектов, страница 50
+      st.prjMany = 120;
+      await page.locator('.screen:not(.leaving) [data-act="prj-chip"][data-v="in_work"]').click();
+      await page.waitForFunction(() => document.querySelectorAll('.screen:not(.leaving) .prj').length === 50, null, { timeout: 8000 });
+      ok(norm(await page.locator('[data-prj-totals]').innerText()).includes('120 проектов') && norm(await page.locator('[data-act="prj-more"]').innerText()).includes('Показать ещё 50'), 'первая порция — 50 строк, итоги по всему отбору (120), «Показать ещё 50»');
+      await page.locator('[data-act="prj-more"]').click();
+      await page.waitForFunction(() => document.querySelectorAll('.screen:not(.leaving) .prj').length === 100, null, { timeout: 8000 });
+      ok(last().query.cursor === '50' && last().query.status === 'in_work' && norm(await page.locator('[data-act="prj-more"]').innerText()).includes('Показать ещё 20'), 'вторая порция — запрос с cursor и тем же отбором, осталось 20');
+      await page.locator('[data-act="prj-more"]').click();
+      await page.waitForFunction(() => document.querySelectorAll('.screen:not(.leaving) .prj').length === 120, null, { timeout: 8000 });
+      ok((await page.locator('[data-act="prj-more"]').count()) === 0, 'третья порция — все 120, кнопки больше нет');
+      st.prjMany = 0;
+      noErrors(errors);
+      await ctx.close();
+    }
+    {
+      // 403 report_unavailable: перечитать /orgs; пункт пропал — вкладка перестраивается
+      const { ctx, page, errors, ctl } = await newCtx(devices['iPhone 13'], { orgs: [{ ...ORG, reports: ['projects', 'debtors'] }] });
+      const st = ctl.state;
+      await page.goto(BASE);
+      await settle(page, 800);
+      await login(page, ctl);
+      await page.locator('.tabbar .tab[data-go="#/reports"]').click();
+      await page.waitForSelector('.screen:not(.leaving) [data-prj-totals]', { timeout: 8000 });
+      ok((await page.locator('.screen:not(.leaving) .seg-btn').allInnerTexts()).map((x) => norm(x).trim()).join('·') === 'Проекты·Должники', 'два отчёта — переключатель «Проекты · Должники»');
+      // отчёт выключили в 1С: сервер отвечает 403, а в /orgs проектов больше нет
+      st.prj403 = true;
+      st.orgs = [{ ...ORG, reports: ['debtors'] }];
+      const mark = ctl.calls.length;
+      await page.locator('.screen:not(.leaving) [data-act="prj-chip"][data-v="in_work"]').click(); // новый запрос списка → 403
+      await page.waitForFunction(() => (document.querySelector('.screen:not(.leaving) .page-title')?.textContent || '').includes('Должники'), null, { timeout: 8000 });
+      await settle(page, 600);
+      ok(ctl.calls.slice(mark).some((c) => c.path === '/orgs' && c.method === 'GET'), '403 report_unavailable → приложение перечитало /orgs');
+      ok((await page.locator('.screen:not(.leaving) .seg').count()) === 0 && norm(await page.locator('.screen:not(.leaving) .page-title').innerText()) === 'Должники' && (await page.evaluate(() => location.hash)) === '#/reports', 'проектов в списке больше нет — вкладка перестроилась: остались «Должники», без переключателя');
+      // отчёт всё ещё в списке, но недоступен — честное «недоступно»
+      st.orgs = [{ ...ORG, reports: ['projects', 'debtors'] }];
+      await page.reload();
+      await page.waitForSelector('.screen:not(.leaving) [data-error="report_unavailable"]', { timeout: 10000 });
+      const gone = norm(await page.locator('.screen:not(.leaving) [data-error="report_unavailable"]').innerText());
+      ok(gone.includes('Отчёты по проектам недоступны') && gone.includes('ФинПульс 1.16.2') && gone.includes('учёт по проектам') && gone.includes('права руководителя'), 'отчёт в списке, но сервер отвечает 403 — «Отчёты по проектам недоступны…»');
+      ok((await page.locator('.screen:not(.leaving) .seg-btn').count()) === 2, 'переключатель на месте — можно уйти в другой отчёт');
+      await shot(page, '19-proekty-nedostupny');
+      noErrors(errors);
+      await ctx.close();
+    }
+
     // ---------- 1г. заявка с несколькими статьями ----------
     console.log('\n▶ Заявка с двумя статьями: превышение лимита — по доле статьи (over_by), не по всей сумме');
     {
@@ -1247,9 +1519,9 @@ const PUSH_STUB = () => {
     }
 
     // ---------- 6б. этап 2: 501 not_implemented ----------
-    console.log('\n▶ Этап 2: 501 not_implemented (календарь, отчёты, настройки)');
+    console.log('\n▶ Этап 2: 501 not_implemented (календарь, настройки) и сервер без списка отчётов');
     {
-      const { ctx, page, errors, ctl } = await newCtx();
+      const { ctx, page, errors, ctl } = await newCtx(devices['iPhone 13'], { orgs: [ORG_OLD] });
       const STAGE2 = /^\/orgs\/[^/]+\/(calendar|reports\/)|^\/me\/settings$/;
       ctl.override = (call, { err }) => (STAGE2.test(call.path) ? (err(501, 'not_implemented', 'Раздел будет на этапе 2'), true) : false);
       await page.goto(BASE);
@@ -1270,12 +1542,12 @@ const PUSH_STUB = () => {
       }
       await shot(page, '09-razdel-v-sleduyushchey-versii');
       const stage2 = ctl.calls.filter((c) => STAGE2.test(c.path));
-      ok(stage2.some((c) => c.path.endsWith('/calendar')) && ['cash-flow', 'plan-fact', 'debtors'].every((r) => stage2.some((c) => c.path.endsWith(`/reports/${r}`))), 'все методы этапа 2 вызывались и получили 501');
+      ok(stage2.some((c) => c.path.endsWith('/calendar')) && !stage2.some((c) => /\/reports\//.test(c.path)), 'календарь запрошен и получил 501; отчёты без списка reports не запрашиваются');
       await page.evaluate(() => { location.hash = '#/home'; });
       await settle(page, 800);
       ok((await page.locator('.screen:not(.leaving) [data-go^="#/calendar"]').count()) === 0, 'после 501 календаря главная не ведёт в календарь («Календарь >», дни, плашка)');
       ok(await page.locator('.screen:not(.leaving) .card-head:has-text("Ближайшие 7 дней") .link-btn').count() === 0, '«Календарь >» скрыт');
-      ok((await page.locator('.screen:not(.leaving) [data-go="#/reports/debtors"]').count()) === 0, 'после 501 отчёта «Нам должны» не ведёт в должников');
+      ok((await page.locator('.screen:not(.leaving) [data-go="#/reports/debtors"]').count()) === 0, 'без debtors в списке отчётов «Нам должны» не ведёт в должников');
       ok(norm(await page.locator('.screen:not(.leaving) .rec-card').innerText()).includes('Долг по возрасту'), 'дебиторка по возрасту — из сводки');
       await shot(page, '10-glavnaya-bez-kalendarya');
       // профиль: без /me/settings

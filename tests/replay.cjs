@@ -431,8 +431,11 @@ function serve() {
     const NAMES = { 'cash-flow': 'ДДС', 'plan-fact': 'План-факт', debtors: 'Должники', projects: 'Проекты' };
     const TABS = { 'cash-flow': 'dds', 'plan-fact': 'plan', debtors: 'debtors', projects: 'projects' };
     const want = (org.reports || []).filter((r) => NAMES[r]);
+    const dumped = (r) => dumps.some((d) => d.path === `/orgs/${org.id}/reports/${r}`);
     const segs = (await page.locator(`${screen} .seg-btn`).allInnerTexts()).map((x) => norm(x).trim());
-    if (!want.length) {
+    if (want.length && !dumped(want[0])) {
+      note(`вкладка «Отчёты» не проверялась: ответ первого отчёта (${NAMES[want[0]]}) не снят`);
+    } else if (!want.length) {
       const stub = await capture('otchety-zaglushka', 'отчёты, заглушка');
       ok(stub.text.includes('Раздел появится'), 'списка отчётов нет — показана заглушка');
     } else if (want.length === 1) {
@@ -442,6 +445,10 @@ function serve() {
     }
 
     for (const r of want.filter((x) => x !== 'projects')) {
+      if (!dumped(r)) {
+        note(`${NAMES[r]} не проверялся: ответ не снят`);
+        continue;
+      }
       console.log(`\n▶ ${NAMES[r]}`);
       await page.evaluate((t) => (location.hash = `#/reports/${t}`), TABS[r]);
       await settle(1500);
@@ -451,7 +458,9 @@ function serve() {
     }
 
     // ---------- проекты ----------
-    if (want.includes('projects')) {
+    if (want.includes('projects') && !dumped('projects')) {
+      note('Проекты не проверялись: ответ не снят');
+    } else if (want.includes('projects')) {
       console.log('\n▶ Проекты');
       const LIST = `/orgs/${org.id}/reports/projects`;
       await page.evaluate(() => (location.hash = '#/reports/projects'));

@@ -71,6 +71,7 @@ docs/
 spec/api-client.md       что приложение ждёт от API (черновик до контракта)
 tests/e2e.cjs            демо в Playwright (iPhone 13 + десктоп)
 tests/server-mock.cjs    режим «сервер» на подменённых ответах API
+tests/replay.cjs         прогон снятых ответов настоящего сервера через приложение (без входа и без сервера)
 screenshots/             скриншоты экранов демо; screenshots/server — состояния режима «сервер»
 ```
 
@@ -81,6 +82,7 @@ node tests/e2e.cjs                 # локально, поднимает сво
 node tests/e2e.cjs --shots         # + обновить скриншоты в /screenshots
 node tests/e2e.cjs https://finpulse.smartsol.pro/   # опубликованный сайт
 node tests/server-mock.cjs         # вход, ошибки, «1С недоступна», согласование, push — без сервера
+node tests/replay.cjs <папка>      # снятые ответы сервера (файлы JSON) → экраны отчётов, снимки и тексты для сверки
 ```
 
 Нужен Node.js 18+ и Playwright (`npm i -D playwright && npx playwright install chromium`).

@@ -221,6 +221,7 @@ function chrome(v) {
   document.documentElement.classList.toggle('theme-dark', dark);
   metaTheme?.setAttribute('content', dark ? '#141414' : '#F4F1EA');
   app.classList.toggle('nav-hidden', !v.nav);
+  app.classList.remove('picking'); // режим выбора заявок живёт до первой перерисовки экрана
   if (v.nav) renderTabbar(v.tab);
 }
 

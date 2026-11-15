@@ -1149,3 +1149,53 @@ button.period-chip { gap: 4px; }
 [data-project] .rh-purpose { margin-top: 5px; font-size: 14.5px; color: var(--stone); }
 [data-project] .rh-sum { margin-top: 14px; }
 .prj-fail-btns { display: flex; flex-direction: column; gap: 10px; margin-top: 4px; align-items: center; }
+
+/* ---------- массовое согласование заявок ---------- */
+.bulk-btn { height: 40px; padding: 0 6px; font-size: 15px; color: var(--ink); }
+.when-picking { display: none; }
+.scroll.selecting .when-idle { display: none; }
+.scroll.selecting .link-btn.when-picking { display: inline-flex; }
+.scroll.selecting .bulk-head { display: flex; }
+.bulk-head { align-items: center; justify-content: space-between; gap: 12px; margin: 6px 4px 6px; min-height: 30px; font-size: 13.5px; color: var(--stone); }
+.bulk-head span { text-align: right; }
+.bulk-all { height: 30px; font-size: 14px; color: var(--ink); text-decoration: underline; text-underline-offset: 3px; }
+.bulk-all[disabled] { opacity: 0.4; }
+.req-check { display: none; }
+.scroll.selecting .req-wrap.pickable, .scroll.selecting .req-wrap.unpickable { display: grid; grid-template-columns: 26px minmax(0, 1fr); gap: 10px; align-items: center; cursor: pointer; }
+.scroll.selecting .req-check { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; box-shadow: inset 0 0 0 2px #cfc8ba; background: var(--card); color: transparent; transition: background 0.15s, box-shadow 0.15s; }
+.req-check .ic { width: 16px; height: 16px; stroke-width: 3; }
+.scroll.selecting .req-wrap.picked .req-check { background: var(--ink); box-shadow: none; color: #fff; }
+.scroll.selecting .req-wrap.picked .req-card { box-shadow: inset 0 0 0 1.5px var(--ink), var(--shadow); }
+.scroll.selecting .req-wrap.unpickable .req-check { box-shadow: inset 0 0 0 2px #e4dfd4; background: transparent; }
+.scroll.selecting .req-wrap.unpickable .req-card { opacity: 0.55; }
+.req-solo { display: none; }
+.scroll.selecting .req-solo { display: inline-flex; }
+.bulk-bar { display: none; grid-template-columns: 1fr; }
+.scroll.selecting ~ .bulk-bar { display: grid; }
+#app .scroll.selecting { padding-bottom: calc(var(--sab) + 104px); }
+.bulk-bar .btn { white-space: nowrap; }
+.bk-list { margin-top: 14px; max-height: 40vh; overflow-y: auto; scrollbar-width: none; border-top: 1px solid var(--line); }
+.bk-list::-webkit-scrollbar { display: none; }
+.bk-row { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; gap: 10px; align-items: start; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.bk-ic { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; margin-top: 1px; box-shadow: inset 0 0 0 1.5px #d7d1c4; color: var(--stone); }
+.bk-ic .ic { width: 13px; height: 13px; stroke-width: 2.8; }
+.bk-ic .spin { width: 14px; height: 14px; border-width: 2px; }
+.bk-row[data-st="run"] .bk-ic { box-shadow: none; color: var(--ink); }
+.bk-row[data-st="ok"] .bk-ic { box-shadow: none; background: var(--pos-bg); color: var(--pos); }
+.bk-row[data-st="info"] .bk-ic { box-shadow: none; background: var(--lav); color: var(--ink); }
+.bk-row[data-st="fail"] .bk-ic { box-shadow: none; background: var(--peach); color: var(--coral-ink); }
+.bk-row[data-st="skip"] .bk-ic { box-shadow: none; background: #efebe3; color: var(--stone); }
+.bk-main { min-width: 0; display: flex; flex-direction: column; }
+.bk-main b { font-size: 14px; line-height: 1.35; overflow-wrap: anywhere; }
+.bk-main small { font-size: 12.5px; line-height: 1.4; color: var(--stone); }
+.bk-main small:empty { display: none; }
+.bk-row[data-st="fail"] .bk-main small { color: var(--coral-ink); }
+.bk-row[data-st="ok"] .bk-main small { color: var(--pos); }
+.bk-sum { font: 600 14px/1.35 var(--f-head); white-space: nowrap; }
+.bk-bar { height: 6px; margin-top: 14px; border-radius: 3px; background: rgba(20, 20, 20, 0.08); overflow: hidden; }
+.bk-bar i { display: block; height: 100%; border-radius: 3px; background: var(--ink); transition: width 0.3s var(--ease); }
+.ds-ic.ok { background: var(--mint); color: var(--pos); }
+.bk-result { padding-top: 4px; }
+.bk-list.plain .bk-row { grid-template-columns: minmax(0, 1fr) auto; }
+.bk-list.plain .bk-ic { display: none; }
+#app.picking .toast { bottom: calc(var(--sab) + 104px); }

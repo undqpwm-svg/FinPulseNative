@@ -483,6 +483,34 @@ async function runFlow(browser, name, opts, isPhone) {
   await page.waitForFunction(() => !document.querySelector('.toast.show'), null, { timeout: 5000 });
   await settle(page, 500);
   if (isPhone) await shot(page, '25-glavnaya-sever-treyd');
+
+  // --- массовое согласование на демо-данных («Север Трейд»: три заявки, одна сверх лимита) ---
+  await tab(page, '#/requests');
+  await settle(page);
+  ok(await page.locator('.screen:not(.leaving) [data-act="bulk-start"]').isVisible(), 'демо: на вкладке «Ждут решения» есть «Выбрать»');
+  await tap(page, '[data-act="bulk-start"]');
+  await settle(page, 300);
+  ok(await page.locator('.screen:not(.leaving) .req-wrap.unpickable').count() === 1 && (await page.locator('.screen:not(.leaving) .req-wrap.unpickable').innerText().then(norm)).includes('только по одной'), 'демо: заявка сверх лимита — «только по одной»');
+  await tap(page, '[data-act="bulk-all"]');
+  await settle(page, 300);
+  const bulkBtn = await page.locator('.screen:not(.leaving) [data-bulk-go]').innerText().then(norm);
+  ok(await page.locator('.screen:not(.leaving) .req-wrap.picked').count() === 2 && bulkBtn.includes('Согласовать (2)'), `демо: «Выбрать все» — две заявки, кнопка «${bulkBtn.trim()}»`);
+  await noHScroll(page, 'Заявки, выбор');
+  if (isPhone) await shot(page, '37-zayavki-vybor');
+  await tap(page, '[data-bulk-go]');
+  await settle(page, 500);
+  ok((await page.locator('.sheet-wrap').innerText().then(norm)).includes('Согласовать 2 заявки?') && await page.locator('.sheet-wrap .bk-row').count() === 2, 'демо: подтверждение со списком двух заявок');
+  await noHScroll(page, 'Заявки, подтверждение');
+  if (isPhone) await shot(page, '38-zayavki-podtverzhdenie');
+  await tap(page, '[data-act="bulk-send"]');
+  await page.waitForSelector('.sheet-wrap [data-bulk-result]', { timeout: 15000 });
+  await settle(page, 400);
+  const bulkRes = await page.locator('.sheet-wrap').innerText().then(norm);
+  ok(bulkRes.includes('Согласовано: 2') && bulkRes.includes('Все выбранные заявки согласованы') && await page.locator('.sheet-wrap .bk-row[data-st="ok"]').count() === 2, 'демо: итог «Согласовано: 2», по каждой заявке — «Согласована»');
+  if (isPhone) await shot(page, '39-zayavki-itog');
+  await tap(page, '[data-act="bulk-done"]');
+  await settle(page, 900);
+  ok(await page.locator('.screen:not(.leaving) .req-card').count() === 1 && (await tabBadge(page)) === '1' && await page.locator('.screen:not(.leaving) [data-act="bulk-start"]').count() === 0, 'демо: в списке осталась одна заявка, значок вкладки — 1');
   await page.evaluate(() => { location.hash = '#/profile'; });
   await settle(page);
   await tap(page, '[data-act="switch-org"][data-id="alfa"]');

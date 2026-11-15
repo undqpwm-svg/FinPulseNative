@@ -275,6 +275,51 @@ async function mockApi(page, ctl) {
     if (p === '/orgs/org_test/summary') return json(200, summary());
     if (p === '/orgs/org_test/accounts') return json(200, { updated_at: T(TODAY, '10:15'), date: TODAY, items: [{ id: 'acc_1', type: 'bank', name: 'Тест Банк', note: null, number_masked: 'KZ•• 0001', currency: 'KZT', balance: 4800000, balance_kzt: 4800000, deposit: false }, { id: 'acc_2', type: 'cash', name: 'Касса', note: null, number_masked: null, currency: 'KZT', balance: 200000, balance_kzt: 200000, deposit: false }], total_kzt: 5000000 });
     if (p === '/orgs/org_test/calendar') return json(200, { updated_at: T(TODAY, '10:15'), from: TODAY, to: day(27), opening: 5000000, threshold: 0, gap: null, days: calDays() });
+    // ---- массовое согласование: st.bulk = { items, plan: { id: [исход 1-й попытки, 2-й, …] }, delay } ----
+    // Исходы: ok, next (ушла на следующий этап), decided (409), stage (409 not_awaiting_you), failed (422),
+    // 503, 504 (решение не применено), 504-applied (применено, ответ потерян), abort (обрыв связи).
+    if (st.bulk && (p === '/orgs/org_test/requests' || /^\/orgs\/org_test\/requests\/req_b\d+\/approve$/.test(p))) {
+      const B = st.bulk;
+      B.gone = B.gone || new Set();
+      B.tries = B.tries || {};
+      B.applied = B.applied || new Set();
+      B.log = B.log || [];
+      if (p === '/orgs/org_test/requests') {
+        return json(200, { updated_at: T(TODAY, '10:15'), items: url.searchParams.get('tab') === 'decided' ? [] : B.items.filter((c) => !B.gone.has(c.id)).map(listItem), next_cursor: null });
+      }
+      const id = p.split('/')[4];
+      const c = B.items.find((x) => x.id === id);
+      const key = call.headers['idempotency-key'];
+      B.tries[id] = (B.tries[id] || 0) + 1;
+      B.active = (B.active || 0) + 1;
+      B.maxActive = Math.max(B.maxActive || 0, B.active);
+      B.log.push({ id, key, body, attempt: B.tries[id] });
+      await new Promise((r) => setTimeout(r, B.delay || 120));
+      B.active -= 1;
+      const how = (B.plan[id] || [])[B.tries[id] - 1] || 'ok';
+      const done = (over, replay) => {
+        B.applied.add(key);
+        B.gone.add(id);
+        return json(200, { ...c, status: 'approved', my_action: 'approved', my_decision_at: T(TODAY, '10:20'), ...over }, replay ? { 'Idempotent-Replayed': 'true' } : {});
+      };
+      if (B.applied.has(key)) return done({}, true); // повтор с тем же ключом: второго решения нет
+      if (how === 'next') return done({ status: 'on_approval', route: c.route.map((x) => (x.stage === 1 ? { ...x, state: 'done', decision: 'approved', at: T(TODAY, '10:20') } : x.stage === 2 ? { ...x, state: 'current' } : x)) });
+      if (how === 'decided') {
+        B.gone.add(id);
+        return err(409, 'already_decided', 'Заявку уже согласовал Самат Ахметов 11.11.2026 в 10:12', { decided_by: 'Самат Ахметов', decided_at: T(TODAY, '10:12'), decision: 'approved' });
+      }
+      if (how === 'stage') return err(409, 'not_awaiting_you', 'Заявка сейчас не на вашем этапе');
+      if (how === 'failed') return err(422, 'action_failed', 'Заявка заблокирована другим пользователем: Бекова Г. Т.');
+      if (how === '503') return err(503, 'source_unavailable', 'Нет связи с учётом компании', undefined, { 'Retry-After': '30' });
+      if (how === '504') return err(504, 'source_timeout', 'Учёт не успел ответить');
+      if (how === '504-applied') {
+        B.applied.add(key);
+        B.gone.add(id);
+        return err(504, 'source_timeout', 'Учёт не успел ответить');
+      }
+      if (how === 'abort') return route.abort('failed');
+      return done({});
+    }
     if (p === '/orgs/org_test/requests') {
       const c = card();
       if (url.searchParams.get('tab') === 'decided') return json(200, { updated_at: T(TODAY, '10:15'), items: st.decided ? [listItem(card({ my_action: 'approved', my_decision_at: T(TODAY, '10:20') }))] : [], next_cursor: null });
@@ -1232,6 +1277,195 @@ const PUSH_STUB = () => {
       await settle(page, 1200);
       ok((await page.evaluate(() => location.hash)) === '#/login', 'access_revoked при обновлении → экран входа');
       ok(norm(await page.locator('#login-err').innerText()).includes('Администратор выключил вам доступ'), 'на входе — текст message');
+      noErrors(errors);
+      await ctx.close();
+    }
+
+    // ---------- массовое согласование заявок ----------
+    console.log('\n▶ Массовое согласование: выбор галочками, подтверждение, итог по каждой заявке');
+    const bulkItems = (n) => Array.from({ length: n }, (_, i) => card({
+      id: `req_b${i + 1}`, number: String(911 + i), counterparty: `ТОО «Поставщик ${i + 1}»`, amount: 100000 * (i + 1), amount_kzt: 100000 * (i + 1), purpose: `Оплата по счёту № ${i + 1}`,
+      budgets: [{ article: 'Аренда', cost_center: null, month: '2026-11', has_limit: true, limit: 2000000, spent: 300000, approved_requests: 200000, available: 1500000, this_request: 100000 * (i + 1), over_by: i === 0 ? 200000 : 0 }],
+    }));
+    const scrB = '.screen:not(.leaving)';
+    const openRequests = async (page) => {
+      await page.locator('.tabbar .tab[data-go="#/requests"]').click();
+      await page.waitForSelector(`${scrB} .req-list`, { timeout: 8000 });
+      await settle(page, 500);
+    };
+    const sheetText = async (page) => norm(await page.locator('.sheet-wrap').innerText());
+    const waitResult = (page) => page.waitForSelector('.sheet-wrap [data-bulk-result]', { timeout: 20000 });
+    {
+      const { ctx, page, errors, ctl } = await newCtx();
+      await page.goto(BASE);
+      await settle(page, 800);
+      await login(page, ctl);
+      await openRequests(page);
+      ok((await page.locator(`${scrB} [data-act="bulk-start"]`).count()) === 0, 'одна заявка на решении — кнопки «Выбрать» нет');
+      ctl.state.bulk = { items: bulkItems(6), plan: { req_b2: ['next'], req_b3: ['decided'], req_b4: ['stage'], req_b5: ['503'], req_b6: ['failed'] } };
+      const B = ctl.state.bulk;
+      await page.locator('.tabbar .tab[data-go="#/home"]').click();
+      await settle(page, 600);
+      await openRequests(page);
+      ok((await page.locator(`${scrB} .req-card`).count()) === 6 && (await page.locator(`${scrB} [data-act="bulk-start"]`).isVisible()), 'шесть заявок — есть «Выбрать»');
+      ok((await page.locator(`${scrB} .req-check`).first().isHidden()) && (await page.locator(`${scrB} .bulk-bar`).isHidden()) && (await page.locator(`${scrB} .req-solo`).first().isHidden()), 'до «Выбрать» галочек, панели и подписи «только по одной» нет');
+      await page.locator(`${scrB} [data-act="bulk-start"]`).click();
+      await settle(page, 400);
+      const go = page.locator(`${scrB} [data-bulk-go]`);
+      ok((await page.locator(`${scrB} .req-check`).count()) === 6 && (await go.isDisabled()) && norm(await go.innerText()).includes('Выберите заявки') && (await page.evaluate(() => document.getElementById('app').classList.contains('nav-hidden'))), 'режим выбора: галочки у строк, внизу панель вместо вкладок, пока ничего не выбрано — кнопка неактивна');
+      const solo = page.locator(`${scrB} .req-wrap.unpickable`);
+      ok((await solo.count()) === 1 && (await solo.getAttribute('data-id')) === 'req_b1' && norm(await solo.innerText()).includes('только по одной'), 'заявка сверх лимита: галочка неактивна, подпись «только по одной»');
+      await solo.click();
+      await settle(page, 300);
+      ok(norm(await page.locator('.toast').innerText()).includes('Сверх лимита — согласуйте из карточки') && (await page.locator(`${scrB} .req-wrap.picked`).count()) === 0 && (await page.evaluate(() => location.hash)) === '#/requests', 'нажатие на неё — подсказка, в выбор не попадает, карточка не открывается');
+      await page.locator(`${scrB} .req-wrap[data-id="req_b2"]`).click();
+      await settle(page, 200);
+      ok((await page.locator(`${scrB} .req-wrap.picked`).count()) === 1 && norm(await go.innerText()).includes('Согласовать (1) · 200 000 ₸') && (await page.evaluate(() => location.hash)) === '#/requests', 'нажатие на строку ставит галочку: «Согласовать (1) · 200 000 ₸», карточка не открывается');
+      await page.locator(`${scrB} .req-wrap[data-id="req_b2"]`).click();
+      ok((await page.locator(`${scrB} .req-wrap.picked`).count()) === 0 && (await go.isDisabled()), 'повторное нажатие снимает галочку');
+      await page.locator(`${scrB} [data-act="bulk-all"]`).click();
+      await settle(page, 200);
+      ok((await page.locator(`${scrB} .req-wrap.picked`).count()) === 5 && norm(await page.locator(`${scrB} [data-bulk-count]`).innerText()) === 'Выбрано 5 из 5' && norm(await go.innerText()).includes('Согласовать (5) · 2 000 000 ₸') && norm(await page.locator(`${scrB} [data-act="bulk-all"]`).innerText()) === 'Снять все', '«Выбрать все» — пять заявок (без той, что сверх лимита), сумма 2 000 000 ₸');
+      await page.waitForFunction(() => !document.querySelector('.toast.show'), null, { timeout: 6000 });
+      await settle(page, 600); // подсказка доигрывает исчезновение
+      await shot(page, '23-zayavki-vybor');
+      await go.click();
+      await settle(page, 500);
+      let sh = await sheetText(page);
+      ok(sh.includes('Согласовать 5 заявок?') && sh.includes('2 000 000 ₸') && (await page.locator('.sheet-wrap .bk-row').count()) === 5 && sh.includes('№ 912 · ТОО «Поставщик 2»') && sh.includes('600 000 ₸') && sh.includes('Согласовать 5') && sh.includes('Отмена'), 'подтверждение: список из пяти заявок — номер, контрагент, сумма — и общая сумма');
+      await shot(page, '24-zayavki-podtverzhdenie');
+      await page.locator('.sheet-wrap .btn[data-act="sheet-close"]').click();
+      await settle(page, 500);
+      ok((await page.locator('.sheet-wrap').count()) === 0 && (await page.locator(`${scrB} .req-wrap.picked`).count()) === 5 && !(B.log || []).length, '«Отмена» — шторка закрыта, выбор на месте, ни одного запроса не ушло');
+      await go.click();
+      await settle(page, 400);
+      B.delay = 500;
+      await page.locator('.sheet-wrap [data-act="bulk-send"]').click();
+      await page.waitForFunction(() => /Согласование: [1-4] из 5/.test(document.querySelector('.sheet-wrap [data-bulk-title]')?.textContent || ''), null, { timeout: 8000 });
+      ok((await page.locator('.sheet-wrap [data-act="bulk-stop"]').isVisible()) && (await page.locator('.sheet-wrap .bk-row[data-st="ok"]').count()) >= 1, 'отправка: счётчик «Согласование: N из 5», у заявок — состояние, есть «Остановить»');
+      await shot(page, '25-zayavki-otpravka');
+      await page.locator('.sheet-backdrop').click({ position: { x: 20, y: 20 }, force: true });
+      ok((await page.locator('.sheet-wrap').count()) === 1, 'пока идёт отправка, шторка нажатием мимо не закрывается');
+      B.delay = 120;
+      await waitResult(page);
+      await settle(page, 300);
+      sh = await sheetText(page);
+      const keys = B.log.map((x) => x.key);
+      ok(B.log.map((x) => x.id).join(' ') === 'req_b2 req_b3 req_b4 req_b5' && B.maxActive === 1, `запросы уходят по одной, по порядку списка, после 503 очередь остановлена (${B.log.map((x) => x.id).join(' ')})`);
+      ok(keys.every((k) => /^[0-9a-f-]{36}$/.test(k || '')) && new Set(keys).size === keys.length && B.log.every((x) => x.body && Object.keys(x.body).length === 0), 'у каждой заявки свой Idempotency-Key, тело запроса — {}');
+      ok(sh.includes('Согласовано 1 из 5') && sh.includes('На 200 000 ₸'), 'итог: «Согласовано 1 из 5», сумма согласованных');
+      ok(sh.includes('Согласована · дальше Финотдел'), 'согласована, но этап не последний — «дальше Финотдел»');
+      ok(sh.includes('Заявку уже согласовал Самат Ахметов 11.11.2026 в 10:12'), '409 already_decided — текст сервера: кто и когда');
+      ok(sh.includes('Сейчас не на вашем этапе — решение не отправлено'), '409 not_awaiting_you — «не на вашем этапе»');
+      ok(sh.includes('Не принято: 1С сейчас недоступна') && sh.includes('Не отправлялась'), '503 — «не принято», следующая заявка не отправлялась');
+      ok(norm(await page.locator('.sheet-wrap [data-act="bulk-retry"]').innerText()).includes('Повторить неудачные (2)'), 'кнопка «Повторить неудачные (2)» — только то, что можно повторить');
+      await shot(page, '26-zayavki-itog');
+      const key5 = B.log.find((x) => x.id === 'req_b5').key;
+      const before = B.log.length;
+      await page.locator('.sheet-wrap [data-act="bulk-retry"]').click();
+      await waitResult(page);
+      await settle(page, 300);
+      sh = await sheetText(page);
+      const again = B.log.slice(before);
+      ok(again.map((x) => x.id).join(' ') === 'req_b5 req_b6' && again[0].key === key5, 'повтор: только неудачные, у повторяемой заявки тот же Idempotency-Key');
+      ok(sh.includes('Согласовано 2 из 5') && sh.includes('Заявка заблокирована другим пользователем: Бекова Г. Т.') && (await page.locator('.sheet-wrap [data-act="bulk-retry"]').count()) === 0, '422 action_failed — текст учёта как есть; повторять больше нечего');
+      const m = ctl.calls.length;
+      await page.locator('.sheet-wrap [data-act="bulk-done"]').click();
+      await settle(page, 1200);
+      ok(ctl.calls.slice(m).some((c) => c.path === '/orgs/org_test/requests' && c.query.tab === 'pending'), '«Готово» — список заявок перечитан');
+      ok((await page.locator(`${scrB} .req-card`).count()) === 3 && (await page.locator(`${scrB} .scroll.selecting`).count()) === 0 && (await page.locator('.tabbar').isVisible()) && !(await page.evaluate(() => document.getElementById('app').classList.contains('nav-hidden'))), 'согласованные ушли из списка (осталось 3), режим выбора снят, вкладки на месте');
+      // «Отмена» в режиме выбора возвращает обычный список
+      await page.locator(`${scrB} [data-act="bulk-start"]`).click();
+      await page.locator(`${scrB} .req-wrap.pickable`).first().click();
+      await page.locator(`${scrB} [data-act="bulk-cancel"]`).click();
+      await settle(page, 300);
+      ok((await page.locator(`${scrB} .scroll.selecting`).count()) === 0 && (await page.locator(`${scrB} .req-wrap.picked`).count()) === 0 && (await page.locator(`${scrB} .req-card[data-go]`).count()) === 3 && (await page.locator('.tabbar').isVisible()), '«Отмена» — выбор снят, строки снова открывают карточку');
+      noErrors(errors);
+      await ctx.close();
+    }
+    {
+      // нет ответа: 504 и обрыв — повтор с тем же ключом (6.4)
+      const { ctx, page, errors, ctl } = await newCtx();
+      ctl.state.bulk = { items: bulkItems(4), plan: { req_b2: ['504-applied'], req_b3: ['abort', 'abort'] } };
+      const B = ctl.state.bulk;
+      await page.goto(BASE);
+      await settle(page, 800);
+      await login(page, ctl);
+      await openRequests(page);
+      await page.locator(`${scrB} [data-act="bulk-start"]`).click();
+      await page.locator(`${scrB} [data-act="bulk-all"]`).click();
+      await page.locator(`${scrB} [data-bulk-go]`).click();
+      await settle(page, 400);
+      await page.locator('.sheet-wrap [data-act="bulk-send"]').click();
+      await waitResult(page);
+      await settle(page, 300);
+      let sh = await sheetText(page);
+      const of = (id) => B.log.filter((x) => x.id === id);
+      ok(of('req_b2').length === 2 && of('req_b2')[0].key === of('req_b2')[1].key && sh.includes('№ 912 · ТОО «Поставщик 2»') && (await page.locator('.sheet-wrap .bk-row[data-bk="req_b2"]').getAttribute('data-st')) === 'ok', '504 без ответа: повтор с тем же ключом — заявка согласована один раз');
+      ok(of('req_b3').length === 2 && of('req_b3')[0].key === of('req_b3')[1].key && sh.includes('Нет ответа — неизвестно, принято ли решение') && of('req_b4').length === 0 && sh.includes('Не отправлялась'), 'обрыв связи дважды: «нет ответа», очередь остановлена, следующая заявка не отправлялась');
+      ok(sh.includes('Согласовано 1 из 3') && norm(await page.locator('.sheet-wrap [data-act="bulk-retry"]').innerText()).includes('Повторить неудачные (2)'), 'итог «Согласовано 1 из 3», повторить можно две');
+      const key3 = of('req_b3')[0].key;
+      await page.locator('.sheet-wrap [data-act="bulk-retry"]').click();
+      await waitResult(page);
+      await settle(page, 300);
+      sh = await sheetText(page);
+      ok(of('req_b3').length === 3 && of('req_b3')[2].key === key3 && of('req_b4').length === 1 && sh.includes('Согласовано: 3') && sh.includes('Все выбранные заявки согласованы') && (await page.locator('.sheet-wrap [data-act="bulk-retry"]').count()) === 0, 'повтор после обрыва — тем же ключом; итог «Согласовано: 3»');
+      await page.locator('.sheet-wrap [data-act="bulk-done"]').click();
+      await settle(page, 1200);
+      ok((await page.locator(`${scrB} .req-card`).count()) === 1 && (await page.locator(`${scrB} [data-act="bulk-start"]`).count()) === 0, 'в списке осталась одна заявка (сверх лимита) — «Выбрать» больше нет');
+      noErrors(errors);
+      await ctx.close();
+    }
+    {
+      // «Остановить»: текущая заявка дойдёт, остальные не отправляются
+      const { ctx, page, errors, ctl } = await newCtx();
+      ctl.state.bulk = { items: bulkItems(5), plan: {}, delay: 900 };
+      const B = ctl.state.bulk;
+      await page.goto(BASE);
+      await settle(page, 800);
+      await login(page, ctl);
+      await openRequests(page);
+      await page.locator(`${scrB} [data-act="bulk-start"]`).click();
+      await page.locator(`${scrB} [data-act="bulk-all"]`).click();
+      await page.locator(`${scrB} [data-bulk-go]`).click();
+      await settle(page, 400);
+      await page.locator('.sheet-wrap [data-act="bulk-send"]').click();
+      await page.waitForSelector('.sheet-wrap .bk-row[data-st="run"]', { timeout: 8000 });
+      await page.locator('.sheet-wrap [data-act="bulk-stop"]').click();
+      ok(norm(await page.locator('.sheet-wrap [data-act="bulk-stop"]').innerText()).includes('Остановится после текущей заявки'), '«Остановить» — «Остановится после текущей заявки»');
+      await waitResult(page);
+      await settle(page, 300);
+      const sh = await sheetText(page);
+      ok(B.log.length === 1 && sh.includes('Согласовано 1 из 4') && (await page.locator('.sheet-wrap .bk-row[data-st="skip"]').count()) === 3 && norm(await page.locator('.sheet-wrap [data-act="bulk-retry"]').innerText()).includes('(3)'), 'после остановки: одна согласована, три не отправлялись и их можно отправить');
+      // итог закрыли нажатием мимо шторки — то же, что «Готово»: список перечитан, режим выбора снят
+      const m = ctl.calls.length;
+      await page.locator('.sheet-backdrop').click({ position: { x: 20, y: 20 }, force: true });
+      await settle(page, 1200);
+      ok((await page.locator('.sheet-wrap').count()) === 0 && ctl.calls.slice(m).some((c) => c.path === '/orgs/org_test/requests') && (await page.locator(`${scrB} .req-card`).count()) === 4 && (await page.locator(`${scrB} .scroll.selecting`).count()) === 0, 'итог закрыт нажатием мимо шторки — список перечитан (осталось 4), режим выбора снят');
+      noErrors(errors);
+      await ctx.close();
+    }
+    {
+      // переключатель политики лимита (config.js, bulkOverLimit): заявки сверх лимита выбираются наравне с остальными
+      const { ctx, page, errors, ctl } = await newCtx();
+      await page.route('**/js/config.js', async (r) => {
+        const resp = await r.fetch();
+        const text = await resp.text();
+        await r.fulfill({ response: resp, body: text.replace('bulkOverLimit: false', 'bulkOverLimit: true') });
+      });
+      ctl.state.bulk = { items: bulkItems(3), plan: {} };
+      await page.goto(BASE);
+      await settle(page, 800);
+      await login(page, ctl);
+      await openRequests(page);
+      await page.locator(`${scrB} [data-act="bulk-start"]`).click();
+      await page.locator(`${scrB} [data-act="bulk-all"]`).click();
+      await settle(page, 200);
+      ok((await page.locator(`${scrB} .req-wrap.unpickable`).count()) === 0 && (await page.locator(`${scrB} .req-wrap.picked`).count()) === 3, 'bulkOverLimit: true — заявка сверх лимита выбирается вместе с остальными');
+      await page.locator(`${scrB} [data-bulk-go]`).click();
+      await settle(page, 400);
+      const sh = await sheetText(page);
+      ok(sh.includes('Согласовать 3 заявки?') && sh.includes('Сверх лимита: 1 из 3') && sh.includes('Превышение — 200 000 ₸'), 'в подтверждении — «Сверх лимита: 1 из 3», превышение 200 000 ₸');
       noErrors(errors);
       await ctx.close();
     }

@@ -81,7 +81,7 @@ screenshots/             скриншоты экранов демо; screenshots
 node tests/e2e.cjs                 # локально, поднимает свой сервер
 node tests/e2e.cjs --shots         # + обновить скриншоты в /screenshots
 node tests/e2e.cjs https://finpulse.smartsol.pro/   # опубликованный сайт
-node tests/server-mock.cjs         # вход, ошибки, «1С недоступна», согласование, push — без сервера
+node tests/server-mock.cjs         # вход, ошибки, «1С недоступна», согласование (по одной и массовое), push — без сервера
 node tests/replay.cjs <папка>      # снятые ответы сервера (файлы JSON) → календарь и отчёты, снимки и тексты для сверки
 ```
 

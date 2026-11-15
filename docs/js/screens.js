@@ -1357,16 +1357,20 @@ function dueLabel(r, today) {
   return `до ${dayMonth(D(r.due))} · ${relDay(off)}`;
 }
 
-function reqCard(r, today, leaving = false) {
+// pick — строка участвует в режиме выбора (массовое согласование): слева место под галочку. Заявку, которую в выбор
+// брать нельзя (сверх лимита), помечаем «только по одной».
+function reqCard(r, today, leaving = false, pick = false) {
   const urgent = offset(r.due, today) <= 2 && r.status === 'pending';
   const statusTag = r.status === 'approved'
     ? '<span class="tag tag-pos">Согласована</span>'
     : r.status === 'rejected' ? '<span class="tag tag-neg">Отклонена</span>' : r.status === 'returned' ? '<span class="tag">На доработке</span>' : '';
-  return `<div class="req-wrap ${leaving ? 'leaving' : ''}" data-id="${H(r.id)}">
+  const can = pick && bulkOk(r);
+  return `<div class="req-wrap ${leaving ? 'leaving' : ''}${pick ? (can ? ' pickable' : ' unpickable') : ''}" data-id="${H(r.id)}">
+    ${pick ? `<span class="req-check" aria-hidden="true">${can ? I.check : ''}</span>` : ''}
     <button class="req-card" data-go="#/requests/${H(r.id)}">
       <span class="req-top"><b class="req-who">${H(r.contractor)}</b><b class="req-sum">${money(r.amount)}</b></span>
       <span class="req-purpose">${H(r.purpose)}</span>
-      <span class="req-tags"><span class="tag">${H(r.article)}</span>${r.overLimit > 0 && r.status === 'pending' ? `<span class="tag tag-warn">${I.alert}Сверх лимита</span>` : ''}${statusTag}</span>
+      <span class="req-tags"><span class="tag">${H(r.article)}</span>${r.overLimit > 0 && r.status === 'pending' ? `<span class="tag tag-warn">${I.alert}Сверх лимита</span>` : ''}${pick && !can ? '<span class="tag req-solo">только по одной</span>' : ''}${statusTag}</span>
       <span class="req-foot">
         <span class="req-person">${personAva(r.initiator.initials, 'ava-xs')}${H(r.initiator.name)}</span>
         ${r.status === 'pending' ? `<span class="req-due ${urgent ? 'urgent' : ''}">${I.clock}${dueLabel(r, today)}</span>` : `<span class="req-due">${stampAt(r.decidedAt, today)}</span>`}
@@ -1383,11 +1387,14 @@ async function requestList() {
   const items = data.items || [];
   const today = data.today;
   let list;
+  // Массовое согласование — когда заявок на решении хотя бы две. Пока идёт отправка, состояние выбора не трогаем.
+  const canBulk = tab === 'pending' && items.length > 1;
+  if (!(bulk && bulk.running)) bulk = canBulk ? { items, today, sel: new Set(), keys: new Map(), res: new Map(), running: false, stop: false } : null;
   if (tab === 'pending') {
     nav.badge = items.length;
     const lv = ui.leaving && !items.some((r) => r.id === ui.leaving.id) ? ui.leaving : null;
     const rows = lv ? [...items, { ...lv, status: 'pending', leavingRow: true }].sort((a, b) => (a.due < b.due ? -1 : a.due > b.due ? 1 : 0)) : items;
-    list = rows.map((r) => reqCard(r, today, !!r.leavingRow)).join('');
+    list = rows.map((r) => reqCard(r, today, !!r.leavingRow, canBulk && !r.leavingRow)).join('');
     if (!items.length) {
       list += `<div class="empty ${lv ? 'delay' : ''}">
         <span class="empty-ic ok">${I.check}</span>
@@ -1401,11 +1408,13 @@ async function requestList() {
   return {
     key: 'requests', tab: 'requests', depth: 1, nav: true, title: 'Заявки',
     html: `<div class="scroll">
-      <div class="page-head"><h1 class="page-title">Заявки</h1></div>
+      <div class="page-head"><h1 class="page-title">Заявки</h1>${canBulk ? '<button class="link-btn bulk-btn when-idle" data-act="bulk-start">Выбрать</button><button class="link-btn bulk-btn when-picking" data-act="bulk-cancel">Отмена</button>' : ''}</div>
       ${segmented([{ v: 'pending', label: `Ждут решения${tab === 'pending' && items.length ? ` · ${items.length}` : ''}` }, { v: 'done', label: 'Решённые' }], tab, (v) => `data-act="req-tab" data-v="${v}"`)}
-      ${tab === 'pending' && items.length ? `<p class="list-sum">${items.length} ${plural(items.length, REQ_FORMS)} на ${money(sum(items, (r) => r.amount))}</p>` : '<div class="list-gap"></div>'}
+      ${tab === 'pending' && items.length ? `<p class="list-sum when-idle">${items.length} ${plural(items.length, REQ_FORMS)} на ${money(sum(items, (r) => r.amount))}</p>` : '<div class="list-gap"></div>'}
+      ${canBulk ? '<div class="bulk-head when-picking"><button class="link-btn bulk-all" data-act="bulk-all" data-bulk-all>Выбрать все</button><span data-bulk-count></span></div>' : ''}
       <div class="req-list">${list}</div>
-    </div>`,
+    </div>
+    ${canBulk ? '<div class="actionbar bulk-bar"><button class="btn btn-primary btn-block" data-act="bulk-confirm" data-bulk-go disabled>Выберите заявки</button></div>' : ''}`,
     mount(el) {
       const lvEl = el.querySelector('.req-wrap.leaving');
       if (!lvEl) return;
@@ -1429,6 +1438,286 @@ actions['req-tab'] = (t) => {
   ui.reqTab = t.dataset.v;
   ui.leaving = null;
   nav.rerender();
+};
+
+// ---------- массовое согласование ----------
+// На вкладке «Ждут решения»: «Выбрать» → галочки у заявок → внизу «Согласовать (N) · сумма» → шторка со списком и
+// общей суммой → решения уходят по одной, тем же POST …/approve, что из карточки (контракт, 6.4–6.5), у каждой заявки
+// свой Idempotency-Key → итог по каждой заявке → список перечитывается.
+// Только согласование: отклонить и вернуть на доработку требуют комментарий — по одной, из карточки.
+// Заявки сверх лимита в выбор не попадают: их согласуют по одной, глядя в карточку (переключается в config.js,
+// bulkOverLimit).
+let bulk = null; // { items, today, sel: Set(id), keys: Map(id → ключ), res: Map(id → итог), running, stop }
+const bulkOk = (r) => CONFIG.bulkOverLimit || !(r.overLimit > 0);
+const REQ_ACC = ['заявку', 'заявки', 'заявок'];
+const bulkPicked = () => (bulk ? bulk.items.filter((r) => bulk.sel.has(r.id)) : []);
+// Режим выбора помечается на .scroll: он пересоздаётся при любой перерисовке экрана, и режим сам сбрасывается.
+const bulkScreen = () => {
+  const sc = document.querySelector('.screen:not(.leaving) .scroll.selecting');
+  return sc ? sc.parentElement : null;
+};
+
+// Галочки, счётчик и кнопка — по текущему выбору (без перерисовки экрана: список не перечитывается, прокрутка на месте).
+function bulkPaint() {
+  const scr = bulkScreen();
+  if (!scr || !bulk) return;
+  const can = bulk.items.filter(bulkOk);
+  const picked = bulkPicked();
+  scr.querySelectorAll('.req-wrap.pickable').forEach((w) => {
+    const on = bulk.sel.has(w.dataset.id);
+    w.classList.toggle('picked', on);
+    w.setAttribute('aria-checked', on ? 'true' : 'false');
+  });
+  scr.querySelector('[data-bulk-count]').textContent = `Выбрано ${picked.length} из ${can.length}`;
+  const all = scr.querySelector('[data-bulk-all]');
+  all.textContent = can.length && picked.length === can.length ? 'Снять все' : 'Выбрать все';
+  all.disabled = !can.length;
+  const go = scr.querySelector('[data-bulk-go]');
+  go.disabled = !picked.length;
+  go.innerHTML = picked.length ? `${I.check}Согласовать (${picked.length}) · ${money(sum(picked, (r) => r.amount))}` : 'Выберите заявки';
+}
+
+function bulkMode(scr, on) {
+  if (!scr) return;
+  scr.classList.toggle('selecting', on);
+  const app = document.getElementById('app');
+  app.classList.toggle('nav-hidden', on); // вместо вкладок — панель «Согласовать (N)»
+  app.classList.toggle('picking', on); // подсказки-тосты — над панелью
+  scr.querySelectorAll('.req-wrap.pickable, .req-wrap.unpickable').forEach((w) => {
+    const btn = w.querySelector('.req-card');
+    if (on) {
+      btn.removeAttribute('data-go'); // в режиме выбора нажатие ставит галочку, а не открывает карточку
+      w.dataset.act = 'bulk-toggle';
+      w.setAttribute('role', 'checkbox');
+    } else {
+      btn.dataset.go = `#/requests/${w.dataset.id}`;
+      delete w.dataset.act;
+      w.removeAttribute('role');
+      w.removeAttribute('aria-checked');
+      w.classList.remove('picked');
+    }
+  });
+}
+
+actions['bulk-start'] = (t) => {
+  if (!bulk || bulk.running) return;
+  bulk.sel.clear();
+  bulkMode(t.closest('.scroll'), true);
+  bulkPaint();
+};
+
+actions['bulk-cancel'] = (t) => {
+  if (!bulk || bulk.running) return;
+  bulk.sel.clear();
+  bulkMode(t.closest('.scroll'), false);
+};
+
+actions['bulk-toggle'] = (t) => {
+  if (!bulk || bulk.running) return;
+  const r = bulk.items.find((x) => x.id === t.dataset.id);
+  if (!r) return;
+  if (!bulkOk(r)) {
+    toast('Сверх лимита — согласуйте из карточки', 'info');
+    return;
+  }
+  if (bulk.sel.has(r.id)) bulk.sel.delete(r.id);
+  else bulk.sel.add(r.id);
+  bulkPaint();
+};
+
+actions['bulk-all'] = () => {
+  if (!bulk || bulk.running) return;
+  const can = bulk.items.filter(bulkOk);
+  const all = can.length && can.every((r) => bulk.sel.has(r.id));
+  bulk.sel = new Set(all ? [] : can.map((r) => r.id));
+  bulkPaint();
+};
+
+// Строка заявки в шторке: номер, контрагент, сумма; под ними — состояние (при отправке и в итоге).
+const BULK_IC = { wait: '', run: spinner, ok: I.check, info: I.info, fail: I.alert, skip: I.clock };
+function bulkRow(r) {
+  const s = bulk.res.get(r.id);
+  const st = s ? s.st : 'wait';
+  return `<div class="bk-row" data-bk="${H(r.id)}" data-st="${st}">
+    <span class="bk-ic">${BULK_IC[st] || ''}</span>
+    <span class="bk-main"><b>№${NB}${H(r.num)} · ${H(r.contractor)}</b><small>${s && s.text ? H(s.text) : ''}</small></span>
+    <span class="bk-sum">${money(r.amount)}</span>
+  </div>`;
+}
+
+actions['bulk-confirm'] = () => {
+  if (!bulk || bulk.running || ui.busy) return;
+  const picked = bulkPicked();
+  if (!picked.length) return;
+  bulk.res = new Map();
+  bulk.keys = new Map(); // новое подтверждение — новые ключи: это новое действие пользователя
+  const over = picked.filter((r) => r.overLimit > 0);
+  openSheet(`<div class="sheet-title">Согласовать ${picked.length} ${plural(picked.length, REQ_ACC)}?</div>
+    <div class="confirm-sum">${money(sum(picked, (r) => r.amount))}</div>
+    <p class="confirm-sub">Каждая заявка согласуется в учёте отдельно</p>
+    ${over.length ? `<div class="over-note compact">${I.alert}<div><b>Сверх лимита: ${over.length} из ${picked.length}</b><span>Превышение — ${money(sum(over, (r) => r.overLimit))}</span></div></div>` : ''}
+    <div class="bk-list plain" data-bulk-list>${picked.map(bulkRow).join('')}</div>
+    <div class="sheet-actions">
+      <button class="btn btn-primary btn-block" data-act="bulk-send">Согласовать ${picked.length}</button>
+      <button class="btn btn-text btn-block" data-act="sheet-close">Отмена</button>
+    </div>`);
+};
+
+// Чем закончилась отправка одной заявки: текст для строки и можно ли повторить (с тем же ключом — второго решения
+// не будет). halt — дальше не идём: связи или учёта нет, остальные заявки ждало бы то же самое.
+function bulkFail(e, today) {
+  const c = e instanceof ApiError ? e.code : 'server_error';
+  const raw = (e instanceof ApiError && e.details && e.details.contractCode) || c;
+  if (c === 'already_decided') {
+    const det = e.details || {};
+    const what = det.status === 'rejected' ? 'отклонена' : det.status === 'returned' ? 'возвращена на доработку' : 'согласована';
+    return { st: 'info', text: e.message || `Уже ${what}${det.by ? `: ${det.by}` : ''}${det.at ? `, ${stampAt(det.at, today)}` : ''}` };
+  }
+  if (raw === 'not_awaiting_you') return { st: 'info', text: 'Сейчас не на вашем этапе — решение не отправлено' };
+  if (c === 'forbidden') return { st: 'fail', text: 'Нет прав на это решение' };
+  if (c === 'action_failed') return { st: 'fail', text: e.message || 'Учёт не принял решение' };
+  if (c === 'not_found') return { st: 'fail', text: 'Заявка не найдена — возможно, её удалили' };
+  if (c === 'upstream_unavailable') return { st: 'fail', text: 'Не принято: 1С сейчас недоступна', retry: true, halt: true };
+  if (c === 'network' || c === 'timeout') return { st: 'fail', text: 'Нет ответа — неизвестно, принято ли решение. Повтор безопасен: дважды оно не применится', retry: true, halt: true };
+  if (c === 'server_unavailable' || c === 'too_many_requests') return { st: 'fail', text: 'Не принято: сервер недоступен', retry: true, halt: true };
+  return { st: 'fail', text: 'Не удалось отправить решение', retry: true };
+}
+
+const bulkSleep = (ms) => new Promise((res) => setTimeout(res, ms));
+
+function bulkProgress(queue, done) {
+  const wrap = document.querySelector('.sheet-wrap');
+  if (!wrap) return;
+  const t = wrap.querySelector('[data-bulk-title]');
+  if (t) t.textContent = `Согласование: ${done} из ${queue.length}`;
+  const bar = wrap.querySelector('[data-bulk-bar] i');
+  if (bar) bar.style.width = `${Math.round((done / queue.length) * 100)}%`;
+}
+
+function bulkRowUpdate(r) {
+  const row = document.querySelector(`.sheet-wrap .bk-row[data-bk="${CSS.escape(r.id)}"]`);
+  if (!row) return;
+  row.outerHTML = bulkRow(r);
+  const fresh = document.querySelector(`.sheet-wrap .bk-row[data-bk="${CSS.escape(r.id)}"]`);
+  if (fresh && fresh.dataset.st === 'run') fresh.scrollIntoView({ block: 'nearest' });
+}
+
+// Очередь: заявки уходят по одной, по порядку списка. Обрыв или 504 — один повтор с тем же ключом (6.4).
+async function bulkRun(ids) {
+  if (!bulk || bulk.running) return;
+  const queue = bulk.items.filter((r) => ids.includes(r.id));
+  if (!queue.length) return;
+  bulk.running = true;
+  bulk.stop = false;
+  ui.busy = true;
+  bulk.finished = false;
+  queue.forEach((r) => bulk.res.delete(r.id));
+  const shown = bulkPicked();
+  setSheet(`<div class="sheet-title" data-bulk-title>Согласование: 0 из ${queue.length}</div>
+    <div class="bk-bar" data-bulk-bar><i style="width:0%"></i></div>
+    <div class="bk-list" data-bulk-list>${shown.map(bulkRow).join('')}</div>
+    <div class="sheet-actions">
+      <button class="btn btn-secondary btn-block" data-act="bulk-stop">Остановить</button>
+    </div>`);
+  document.querySelector('.sheet-wrap')?.classList.add('busy');
+  const org = api.orgId();
+  let done = 0;
+  let halted = false;
+  for (const r of queue) {
+    if (halted || bulk.stop) {
+      bulk.res.set(r.id, { st: 'skip', text: 'Не отправлялась', retry: true });
+      bulkRowUpdate(r);
+      continue;
+    }
+    if (!bulk.keys.has(r.id)) bulk.keys.set(r.id, uuid());
+    bulk.res.set(r.id, { st: 'run', text: 'Отправляется…' });
+    bulkRowUpdate(r);
+    let out;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const res = await api.decide(org, r.id, { decision: 'approve', comment: '', idempotencyKey: bulk.keys.get(r.id) });
+        const final = !res || !res.requestStatus || res.requestStatus === 'approved';
+        out = { st: 'ok', text: final ? 'Согласована' : `Согласована · дальше ${res.nextApprover || 'следующий этап'}` };
+        break;
+      } catch (e) {
+        if (isSessionEnd(e)) {
+          bulk.running = false;
+          ui.busy = false;
+          bulk = null;
+          await closeSheet(true);
+          onUnauthorized(e);
+          return;
+        }
+        const noAnswer = e instanceof ApiError && (e.code === 'network' || e.code === 'timeout');
+        if (noAnswer && attempt === 0) {
+          bulk.res.set(r.id, { st: 'run', text: 'Нет ответа — повторяем…' });
+          bulkRowUpdate(r);
+          await bulkSleep(1200);
+          continue; // тот же ключ: сервер проверит, применилось ли решение
+        }
+        out = bulkFail(e, bulk.today);
+        break;
+      }
+    }
+    bulk.res.set(r.id, out);
+    if (out.halt) halted = true;
+    done += 1;
+    bulkRowUpdate(r);
+    bulkProgress(queue, done);
+  }
+  bulk.running = false;
+  bulk.finished = true; // решения ушли: как бы ни закрыли итог, список перечитывается
+  ui.busy = false;
+  invalidate();
+  bulkResult();
+}
+
+function bulkResult() {
+  const shown = bulkPicked();
+  const res = (r) => bulk.res.get(r.id) || { st: 'skip', text: 'Не отправлялась', retry: true };
+  const ok = shown.filter((r) => res(r).st === 'ok');
+  const retry = shown.filter((r) => res(r).retry);
+  const rest = shown.length - ok.length;
+  // сначала то, что требует внимания, потом согласованные
+  const order = [...shown.filter((r) => res(r).st !== 'ok'), ...ok];
+  const html = `<div class="decision-state bk-result" data-bulk-result="${rest ? 'partial' : 'ok'}" role="status">
+      <span class="ds-ic ${rest ? '' : 'ok'}">${rest ? I.alert : I.check}</span>
+      <div class="sheet-title">${rest ? `Согласовано ${ok.length} из ${shown.length}` : `Согласовано: ${ok.length}`}</div>
+      <p class="sheet-sub">${ok.length ? `На ${money(sum(ok, (r) => r.amount))}. ` : ''}${rest ? `Остальные: ${rest} — причины в списке.` : 'Все выбранные заявки согласованы.'}</p>
+    </div>
+    <div class="bk-list" data-bulk-list>${order.map(bulkRow).join('')}</div>
+    <div class="sheet-actions">
+      ${retry.length ? `<button class="btn btn-primary btn-block" data-act="bulk-retry">${I.refresh}Повторить неудачные (${retry.length})</button>` : ''}
+      <button class="btn ${retry.length ? 'btn-text' : 'btn-primary'} btn-block" data-act="bulk-done">Готово</button>
+    </div>`;
+  if (sheetOpen()) setSheet(html);
+  else openSheet(html); // шторку закрыл переход «Назад» во время отправки — итог всё равно показываем
+}
+
+actions['bulk-send'] = () => {
+  if (!bulk || ui.busy) return;
+  bulkRun(bulkPicked().map((r) => r.id));
+};
+
+actions['bulk-stop'] = (t) => {
+  if (!bulk || !bulk.running) return;
+  bulk.stop = true;
+  t.disabled = true;
+  t.textContent = 'Остановится после текущей заявки';
+};
+
+actions['bulk-retry'] = () => {
+  if (!bulk || ui.busy) return;
+  bulkRun(bulkPicked().filter((r) => (bulk.res.get(r.id) || {}).retry).map((r) => r.id));
+};
+
+// Итог прочитан — список перечитывается: согласованные заявки из «Ждут решения» уходят.
+actions['bulk-done'] = async () => {
+  if (ui.busy) return;
+  bulk = null;
+  invalidate();
+  await closeSheet();
+  if (location.hash.startsWith('#/requests')) nav.rerender();
 };
 
 function routeStep(s, today) {
@@ -2736,6 +3025,7 @@ actions['logout-all-confirm'] = async (t) => {
 
 actions['sheet-close'] = () => {
   if (ui.busy) return; // решение отправляется — шторку не закрываем
+  if (bulk && bulk.finished) return actions['bulk-done'](); // итог массового согласования: закрыть = «Готово»
   if (pdfUrl) {
     URL.revokeObjectURL(pdfUrl);
     pdfUrl = null;

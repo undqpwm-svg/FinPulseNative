@@ -1152,21 +1152,46 @@ actions.accounts = async () => {
 // ======================================================================
 // ПЛАТЁЖНЫЙ КАЛЕНДАРЬ
 // ======================================================================
-function flowRow(f) {
+// Строка позиции дня. Позиция по заявке — кнопка: ведёт в карточку заявки. off — позиция не входит в остаток
+// (просроченное поступление): без «+» и зелёного, чтобы не читалась как пришедшие деньги.
+function flowRow(f, { hid = false, off = false } = {}) {
   const isIn = f.dir === 'in';
-  return `<div class="flow">
+  const sub = [f.article, f.note].filter(Boolean).join(' · ');
+  const tag = f.requestId ? 'button' : 'div';
+  return `<${tag} class="flow${hid ? ' more' : ''}${off ? ' off' : ''}"${hid ? ' hidden' : ''}${f.requestId ? ` data-go="#/requests/${H(f.requestId)}" data-flow-req` : ''}>
     <span class="flow-ic ${isIn ? 'in' : 'out'}">${isIn ? I.arrowIn : I.arrowOut}</span>
-    <span class="flow-main"><b>${H(f.who)}</b><small>${H(f.article)}${f.note ? ` · ${H(f.note)}` : ''}</small>
-      ${f.requestId ? '<span class="tag tag-lav">по заявке</span>' : ''}</span>
-    <span class="flow-sum ${isIn ? 'pos' : ''}">${money(isIn ? f.amount : -f.amount, { sign: true })}</span>
-  </div>`;
+    <span class="flow-main"><b>${H(f.who)}</b>${sub ? `<small>${H(sub)}</small>` : ''}
+      ${f.requestId ? `<span class="tag tag-lav">по заявке${I.chevR}</span>` : ''}</span>
+    <span class="flow-sum ${isIn && !off ? 'pos' : ''}">${off ? money(f.amount) : money(isIn ? f.amount : -f.amount, { sign: true })}</span>
+  </${tag}>`;
 }
+
+// Позиции группы. В настоящем учёте их в дне бывают десятки: тогда видны пять самых крупных и «Показать все N» —
+// остаток на конец дня остаётся рядом, а не через несколько экранов.
+const FLOW_CUT = 8;
+function flowRows(list, opt = {}) {
+  const cut = list.length > FLOW_CUT ? 5 : list.length;
+  return list.map((f, i) => flowRow(f, { ...opt, hid: i >= cut })).join('')
+    + (cut < list.length ? `<button class="pt-more" data-act="flow-more">Показать все ${list.length}</button>` : '');
+}
+
+actions['flow-more'] = (t) => {
+  t.parentElement.querySelectorAll('.flow.more').forEach((r) => {
+    r.hidden = false;
+  });
+  t.remove();
+};
 
 function dayDetail(day, days, idx, cal) {
   const thr = cal.threshold || 0;
   const neg = day.end < thr;
-  const ins = day.items.filter((f) => f.dir === 'in').sort((a, b) => b.amount - a.amount);
-  const outs = day.items.filter((f) => f.dir !== 'in').sort((a, b) => b.amount - a.amount);
+  const byAmount = (a, b) => b.amount - a.amount;
+  const ins = day.items.filter((f) => f.dir === 'in' && f.inTotals !== false).sort(byAmount);
+  const outs = day.items.filter((f) => f.dir !== 'in' && f.inTotals !== false).sort(byAmount);
+  // Позиции, которые сервер не включил в итоги дня (5.3, in_totals: false), — это просроченные поступления:
+  // срок оплаты прошёл, денег нет. Показываем отдельно, под остатком на конец дня.
+  const offs = day.items.filter((f) => f.inTotals === false).sort(byAmount);
+  const offsIn = offs.every((f) => f.dir === 'in');
   const dt = D(day.date);
   let hint = '';
   if (neg) {
@@ -1184,14 +1209,25 @@ function dayDetail(day, days, idx, cal) {
     </div>
     <div class="bal-line"><span>Остаток на начало дня</span><b>${money(day.start)}</b></div>
     ${!ins.length && !outs.length ? `<div class="empty-mini">${I.calendar}<span>Платежей и поступлений нет</span></div>` : ''}
-    ${ins.length ? `<div class="flow-group"><div class="fg-head"><span>Поступления</span><b class="pos">${money(day.in, { sign: true })}</b></div>${ins.map(flowRow).join('')}</div>` : ''}
-    ${outs.length ? `<div class="flow-group"><div class="fg-head"><span>Платежи</span><b>${money(-day.out)}</b></div>${outs.map(flowRow).join('')}</div>` : ''}
+    ${ins.length ? `<div class="flow-group" data-flows="in"><div class="fg-head"><span>Поступления</span><b class="pos">${money(day.in, { sign: true })}</b></div>${flowRows(ins)}</div>` : ''}
+    ${outs.length ? `<div class="flow-group" data-flows="out"><div class="fg-head"><span>Платежи</span><b>${money(-day.out)}</b></div>${flowRows(outs)}</div>` : ''}
     <div class="bal-line bal-end ${neg ? 'neg' : ''}"><span>Остаток на конец дня</span><b>${money(day.end)}</b></div>
     ${hint}
+    ${offs.length ? `<div class="flow-group flow-off" data-flows="off">
+      <div class="fg-head"><span>${offsIn ? 'Просроченные поступления' : 'Не входит в остаток'}</span><b>${money(sum(offs, (f) => f.amount))}</b></div>
+      <p class="fg-note">${offsIn ? `${offs.length} ${plural(offs.length, ['оплата', 'оплаты', 'оплат'])} — срок прошёл, деньги не пришли. ` : ''}В остаток дня не ${offs.length === 1 ? 'входит' : 'входят'}.</p>
+      ${flowRows(offs, { off: true })}
+    </div>` : ''}
   </section>`;
 }
 
+// Первый кассовый разрыв для плашки над календарём. Сервер присылает его готовым (5.3, gap) — берём его, чтобы
+// число совпадало с главной и с днём; в демо поля нет — считаем по дням.
 function firstGap(cal) {
+  if (cal.gap) {
+    const day = cal.days.find((x) => x.date === cal.gap.date);
+    if (day) return { day, deficit: cal.gap.deficit };
+  }
   const thr = cal.threshold || 0;
   const i = cal.days.findIndex((x) => x.end < thr);
   if (i < 0) return null;
@@ -1207,6 +1243,10 @@ views.calendar = async (params) => {
     cal = await cached(`cal:${org}`, 60e3, () => api.calendar(org));
   } catch (e) {
     if (isLater(e)) later.add('calendar');
+    // 403 от общего прохода (календарь выключен в 1С или нет прав) — те же слова, что у отчётов, но про календарь
+    if (e instanceof ApiError && e.code === 'report_unavailable') {
+      return errorView(e, { key: 'calendar', tab: 'calendar', title: 'Календарь', text: ['Календарь сейчас недоступен', 'Доступ к разделам приложения включает администратор ФинПульса в 1С вашей компании.'] });
+    }
     throw e;
   }
   later.delete('calendar');

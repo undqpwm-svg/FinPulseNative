@@ -377,29 +377,43 @@ export async function accounts(id) {
   };
 }
 
-const fmt = (n) => Math.round(Number(n) || 0).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+// Сумма в валюте счёта или позиции: целая — без копеек, дробная — с двумя знаками (1 234,56).
+const fmt = (n) => {
+  const v = Math.round((Number(n) || 0) * 100) / 100;
+  const [int, frac] = (Number.isInteger(v) ? String(v) : v.toFixed(2)).split('.');
+  return int.replace(/\B(?=(\d{3})+(?!\d))/g, ' ') + (frac ? `,${frac}` : '');
+};
 
 // ---------- календарь (5.3) ----------
+// Заголовок позиции без контрагента (зарплата, налог): статья, а если и её нет — по источнику позиции.
+const SOURCE_TITLE = { request: 'Заявка на оплату', supplier_invoice: 'Счёт поставщика', planned_payment: 'Плановый платёж', salary: 'Зарплата', tax: 'Налоги', expected_receipt: 'Ожидаемая оплата' };
+
 export async function calendar(id) {
   const r = await getJSON(orgPath(id, '/calendar'));
   return {
     today: r.from,
     threshold: r.threshold || 0,
+    // Первый кассовый разрыв — как его посчитал сервер: то же число, что на главной (5.1).
+    gap: r.gap ? { date: r.gap.date, deficit: r.gap.shortage } : null,
     days: (r.days || []).map((d) => ({
       date: d.date,
       start: d.opening,
       end: d.closing,
       in: d.inflow,
       out: d.outflow,
-      items: (d.items || []).map((i) => ({
-        dir: i.direction === 'in' ? 'in' : 'out',
-        who: i.counterparty || 'Без контрагента',
-        article: i.article || '',
-        note: [i.note, i.late ? 'дата прошла' : null, i.preliminary ? 'дата предварительная' : null,
-          i.currency && i.currency !== 'KZT' ? `${fmt(i.amount)} ${i.currency}` : null].filter(Boolean).join(' · '),
-        amount: i.amount_kzt != null ? i.amount_kzt : i.amount, // в тенге, как дневные итоги
-        requestId: i.request_id || null,
-      })),
+      items: (d.items || []).map((i) => {
+        const inTotals = i.in_totals !== false; // false — просроченное поступление: в итоги и остаток дня не входит
+        return {
+          dir: i.direction === 'in' ? 'in' : 'out',
+          who: i.counterparty || i.article || SOURCE_TITLE[i.source] || 'Без контрагента',
+          article: i.counterparty ? i.article || '' : '', // без контрагента статья уже стоит в заголовке
+          note: [i.note, i.late && inTotals ? 'дата прошла' : null, i.preliminary ? 'дата предварительная' : null,
+            i.currency && i.currency !== 'KZT' ? `${fmt(i.amount)} ${i.currency}` : null].filter(Boolean).join(' · '),
+          amount: i.amount_kzt != null ? i.amount_kzt : i.amount, // в тенге, как дневные итоги
+          requestId: i.request_id || null,
+          inTotals,
+        };
+      }),
     })),
   };
 }

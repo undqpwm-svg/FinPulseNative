@@ -1,8 +1,9 @@
 // Прогон настоящих ответов сервера через приложение — без входа и без обращений к серверу.
 // Ответы API, снятые заранее (например, Посредником с api-test и тестовой базы), лежат в папке файлами JSON.
 // Приложение открывается в браузере, все его запросы к API подменяются: вход — условный, остальные GET — из папки.
-// Сценарий проходит вкладку «Отчёты» (все отчёты из reports в /orgs), список проектов, отборы и карточки, для
-// которых есть снятые ответы; сохраняет снимки и текст каждого экрана — по тексту цифры сверяются с 1С.
+// Сценарий проходит календарь (если снят GET /orgs/{org}/calendar), вкладку «Отчёты» (все отчёты из reports в /orgs),
+// список проектов, отборы и карточки, для которых есть снятые ответы; сохраняет снимки и текст каждого экрана —
+// по тексту цифры сверяются с 1С. Ответ календаря заодно проверяется на арифметику контракта 5.3.
 //
 // Запуск: node tests/replay.cjs <папка с ответами> [--out <папка результата>] [--org <id организации>]
 //         [--now 2026-11-16T03:00:00+05:00]
@@ -224,6 +225,203 @@ function serve() {
       ok((debtLink > 0) === (org.reports || []).includes('debtors'), `«Нам должны» ${debtLink ? 'ведёт в «Должники»' : 'без ссылки'} — как в списке reports`);
     } else {
       note('главная не проверялась: ответ /summary не снят');
+    }
+
+    // ---------- календарь ----------
+    const CAL = `/orgs/${org.id}/calendar`;
+    const calDump = dumps.find((d) => d.path === CAL);
+    if (!calDump) {
+      note('календарь не проверялся: ответ /calendar не снят');
+    } else if (calDump.status !== 200) {
+      console.log('\n▶ Календарь');
+      await page.evaluate(() => (location.hash = '#/calendar'));
+      await settle(1500);
+      const s = await capture('kalendar', 'календарь');
+      if (calDump.status === 501) ok((await page.locator(`${screen} [data-later]`).count()) === 1, 'ответ 501 — заглушка «Раздел появится в следующей версии»');
+      else ok(!!s.errCode, `ответ ${calDump.status} — экран ошибки (${s.errCode})`);
+    } else {
+      const cal = calDump.body;
+      const days = cal.days || [];
+      const thr = cal.threshold || 0;
+      const tenge = (v) => `${v < 0 ? '−' : ''}${Math.round(Math.abs(v)).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ' ')} ₸`;
+      const near = (a, b) => Math.abs(a - b) < 0.011;
+      const kzt = (i) => (i.amount_kzt != null ? i.amount_kzt : i.amount);
+      const sumOf = (arr) => arr.reduce((t, i) => t + kzt(i), 0);
+      const offItems = (d) => (d.items || []).filter((i) => i.in_totals === false);
+
+      // ----- сам ответ: арифметика контракта 5.3 (если не сходится — вопрос к серверу, а не к приложению) -----
+      console.log('\n▶ Ответ календаря против контракта 5.3');
+      const bads = [];
+      const chk = (c, m) => {
+        if (!c) bads.push(m);
+      };
+      const iso = (dt) => dt.toISOString().slice(0, 10);
+      chk(days.length > 0 && days[0].date === cal.from, `первый день ${days[0] && days[0].date} — не from ${cal.from}`);
+      chk(days.length > 0 && days[days.length - 1].date === cal.to, `последний день ${days.length && days[days.length - 1].date} — не to ${cal.to}`);
+      chk(days.length === 0 || near(cal.opening, days[0].opening), `opening ответа ${cal.opening} ≠ opening первого дня ${days[0] && days[0].opening}`);
+      const SOURCES = ['request', 'supplier_invoice', 'planned_payment', 'salary', 'tax', 'expected_receipt', 'other'];
+      days.forEach((d, k) => {
+        if (k > 0) {
+          chk(iso(new Date(Date.parse(`${days[k - 1].date}T00:00:00Z`) + 864e5)) === d.date, `${d.date}: дни идут не подряд`);
+          chk(near(d.opening, days[k - 1].closing), `${d.date}: opening ${d.opening} ≠ closing предыдущего дня ${days[k - 1].closing}`);
+        }
+        chk(near(d.opening + d.inflow - d.outflow, d.closing), `${d.date}: opening + inflow − outflow ≠ closing`);
+        const its = d.items || [];
+        chk(near(sumOf(its.filter((i) => i.direction === 'in' && i.in_totals !== false)), d.inflow), `${d.date}: inflow ${d.inflow} ≠ сумме поступлений с in_totals`);
+        chk(near(sumOf(its.filter((i) => i.direction === 'out' && i.in_totals !== false)), d.outflow), `${d.date}: outflow ${d.outflow} ≠ сумме платежей с in_totals`);
+        chk(d.gap === (d.closing < thr), `${d.date}: gap ${d.gap}, а closing ${d.closing} при пороге ${thr}`);
+        its.forEach((i, j) => {
+          const at = `${d.date}, позиция ${j + 1}`;
+          chk(i.direction === 'in' || i.direction === 'out', `${at}: direction ${JSON.stringify(i.direction)}`);
+          chk(typeof i.amount === 'number' && typeof kzt(i) === 'number', `${at}: сумма не число`);
+          chk(SOURCES.includes(i.source), `${at}: source ${JSON.stringify(i.source)}`);
+          chk(i.source !== 'request' || !!i.request_id, `${at}: source request без request_id`);
+          chk(i.currency !== 'KZT' || near(kzt(i), i.amount), `${at}: тенге, а amount_kzt ≠ amount`);
+          chk(typeof i.in_totals === 'boolean', `${at}: нет in_totals`);
+          chk(i.in_totals !== false || (i.direction === 'in' && i.late === true), `${at}: in_totals false не у просроченного поступления`);
+          chk(!(i.direction === 'in' && i.late === true) || i.in_totals === false, `${at}: просроченное поступление входит в итоги`);
+          chk(!i.late || k === 0, `${at}: late не в первом дне`);
+        });
+      });
+      const gapDay = days.find((d) => d.closing < thr);
+      if (gapDay) chk(!!cal.gap && cal.gap.date === gapDay.date && near(cal.gap.shortage, thr - gapDay.closing), `gap ответа ${JSON.stringify(cal.gap)} — ждали ${gapDay.date}, ${thr - gapDay.closing}`);
+      else chk(cal.gap === null, `разрывов по дням нет, а gap ${JSON.stringify(cal.gap)}`);
+      const allOff = days.flatMap(offItems);
+      if (cal.overdue_receipts) chk(cal.overdue_receipts.count === allOff.length && near(cal.overdue_receipts.amount, sumOf(allOff)), `overdue_receipts ${JSON.stringify(cal.overdue_receipts)} — по позициям ${allOff.length} шт. на ${sumOf(allOff)}`);
+      else chk(false, 'нет overdue_receipts');
+      const total = days.reduce((t, d) => t + (d.items || []).length, 0);
+      const maxDay = days.reduce((m, d) => ((d.items || []).length > (m.items || []).length ? d : m), days[0] || { items: [] });
+      ok(bads.length === 0, `ответ сходится с контрактом 5.3${bads.length ? ` — расхождений ${bads.length}: ${bads.slice(0, 8).join('; ')}${bads.length > 8 ? '; …' : ''}` : ''}`);
+      console.log(`    дней ${days.length} (${cal.from} — ${cal.to}), позиций ${total}, больше всего в дне — ${(maxDay.items || []).length} (${maxDay.date}); порог ${thr}; разрыв: ${cal.gap ? `${cal.gap.date}, не хватает ${cal.gap.shortage}` : 'нет'}; просроченных поступлений ${allOff.length}; валюты: ${[...new Set(days.flatMap((d) => (d.items || []).map((i) => i.currency)))].join(', ') || '—'}`);
+
+      // ----- главная и календарь: одно и то же в двух ответах -----
+      const sumDump = dumps.find((d) => d.path === `/orgs/${org.id}/summary` && d.status === 200);
+      if (sumDump) {
+        const sm = sumDump.body;
+        const g1 = sm.gap ? `${sm.gap.date} ${sm.gap.shortage}` : 'нет';
+        const g2 = cal.gap ? `${cal.gap.date} ${cal.gap.shortage}` : 'нет';
+        ok(g1 === g2, `разрыв на главной и в календаре один и тот же (${g1}${g1 === g2 ? '' : ` и ${g2}`})`);
+        const diff = ((sm.week && sm.week.days) || []).filter((w) => {
+          const d = days.find((x) => x.date === w.date);
+          return !d || !near(d.closing, w.closing) || !near(d.inflow, w.inflow) || !near(d.outflow, w.outflow);
+        });
+        ok(diff.length === 0, `«Ближайшие 7 дней» главной совпадают с днями календаря${diff.length ? ` — расходятся: ${diff.map((w) => w.date).join(', ')}` : ''}`);
+      }
+
+      // ----- экран -----
+      console.log('\n▶ Календарь');
+      if (sumDump) {
+        await page.evaluate(() => (location.hash = '#/home'));
+        await settle(900);
+        const links = await page.locator(`${screen} [data-go^="#/calendar"]`).evaluateAll((els) => els.map((e) => e.getAttribute('data-go')));
+        const inRange = links.filter((h) => h.includes('/calendar/')).every((h) => days.some((d) => d.date === h.split('/').pop()));
+        ok(links.length > 0 && inRange, `главная ведёт в календарь: ссылок ${links.length}, все даты — в диапазоне календаря`);
+      }
+      await page.evaluate(() => (location.hash = '#/calendar'));
+      await settle(1500);
+      const wk = await capture('kalendar-nedelya', 'календарь, неделя');
+      ok(!wk.errCode && (await page.locator(`${screen} .wk-row`).count()) === Math.min(7, days.length), `календарь открылся, в неделе ${Math.min(7, days.length)} дней${wk.errCode ? ` — ошибка ${wk.errCode}` : ''}`);
+      if (!wk.errCode && days.length) {
+        console.log(`    ${firstLines(wk.text, 10)}`);
+        // плашка разрыва
+        const strip = page.locator(`${screen} .gap-strip`);
+        if (cal.gap) {
+          const st = (await strip.count()) ? norm(await strip.innerText()) : '';
+          ok((await strip.count()) === 1 && (await strip.getAttribute('data-go')) === `#/calendar/${cal.gap.date}`, `плашка разрыва ведёт в ${cal.gap.date}: «${st.trim()}»`);
+        } else {
+          ok((await strip.count()) === 0, 'разрыва нет — плашки нет');
+        }
+        // каждый день: остатки, итоги и число позиций — как в ответе
+        const miss = [];
+        for (const d of days) {
+          await page.evaluate((h) => (location.hash = h), `#/calendar/${d.date}`);
+          await page.waitForFunction((dt) => location.hash === `#/calendar/${dt}` && !!document.querySelector('.screen:not(.leaving) .day-card'), d.date, { timeout: 8000 });
+          await settle(120);
+          const t = norm(await page.locator(`${screen} .day-card`).innerText());
+          const its = d.items || [];
+          const off = offItems(d);
+          const cnt = async (k) => page.locator(`${screen} .day-card [data-flows="${k}"] .flow`).count();
+          const want = { in: its.filter((i) => i.direction === 'in' && i.in_totals !== false).length, out: its.filter((i) => i.direction !== 'in' && i.in_totals !== false).length, off: off.length };
+          const got = { in: await cnt('in'), out: await cnt('out'), off: await cnt('off') };
+          const why = [];
+          if (!t.includes(tenge(d.opening))) why.push(`нет остатка на начало ${tenge(d.opening)}`);
+          if (!t.includes(tenge(d.closing))) why.push(`нет остатка на конец ${tenge(d.closing)}`);
+          if (want.in && !t.includes(`+${tenge(d.inflow)}`)) why.push(`нет итога поступлений +${tenge(d.inflow)}`);
+          if (want.out && !t.includes(`−${tenge(d.outflow)}`)) why.push(`нет итога платежей −${tenge(d.outflow)}`);
+          for (const k of ['in', 'out', 'off']) if (got[k] !== want[k]) why.push(`${k}: строк ${got[k]}, в ответе ${want[k]}`);
+          if (off.length && !t.includes(tenge(sumOf(off)))) why.push(`нет суммы просроченных ${tenge(sumOf(off))}`);
+          if ((d.closing < thr) !== t.includes('Не хватает')) why.push(`подсказка «Не хватает» ${d.closing < thr ? 'не показана' : 'показана зря'}`);
+          if (/NaN|Infinity|undefined|Invalid Date|\[object Object\]|\bnull\b/.test(t)) why.push('мусор в тексте');
+          if (why.length) miss.push(`${d.date}: ${why.join(', ')}`);
+        }
+        ok(miss.length === 0, `все ${days.length} дней: остатки, итоги и число позиций на экране — как в ответе${miss.length ? ` — расхождения: ${miss.slice(0, 6).join(' | ')}` : ''}`);
+
+        // «Показать все N» в каждой группе дня (кнопка после нажатия исчезает)
+        const openAll = async () => {
+          const more = page.locator(`${screen} [data-act="flow-more"]`);
+          while (await more.count()) await more.first().click();
+        };
+        // дни, которые стоит посмотреть глазами
+        const show = async (d, name, title) => {
+          await page.evaluate((h) => (location.hash = h), `#/calendar/${d.date}`);
+          await settle(700);
+          await openAll();
+          await page.evaluate((sel) => document.querySelector(`${sel} .day-card`).scrollIntoView({ block: 'start' }), screen);
+          return capture(name, title);
+        };
+        const first = await show(days[0], 'kalendar-pervyy-den', 'календарь, первый день');
+        if (offItems(days[0]).length) ok(first.text.includes('Просроченные поступления') && first.text.includes('В остаток дня не вход'), `просроченные поступления (${offItems(days[0]).length}) — отдельным блоком, в остаток не входят`);
+        if ((maxDay.items || []).length && maxDay !== days[0]) await show(maxDay, 'kalendar-samyy-plotnyy-den', `календарь, ${maxDay.date} (больше всего позиций)`);
+        if (gapDay && gapDay !== days[0] && gapDay !== maxDay) await show(gapDay, 'kalendar-razryv', `календарь, разрыв ${gapDay.date}`);
+        const curDay = days.find((d) => (d.items || []).some((i) => i.currency && i.currency !== 'KZT'));
+        if (curDay && ![days[0], maxDay, gapDay].includes(curDay)) await show(curDay, 'kalendar-valyuta', `календарь, валюта ${curDay.date}`);
+        if (curDay) {
+          const ci = curDay.items.find((i) => i.currency && i.currency !== 'KZT');
+          await page.evaluate((h) => (location.hash = h), `#/calendar/${curDay.date}`);
+          await settle(500);
+          const t = norm(await page.locator(`${screen} .day-card`).innerText());
+          ok(t.includes(tenge(ci.amount_kzt)) && t.includes(` ${ci.currency}`), `валютная позиция: сумма в тенге ${tenge(ci.amount_kzt)} и подпись в ${ci.currency}`);
+        }
+
+        // позиция по заявке → карточка заявки
+        const reqDay = days.find((d) => (d.items || []).some((i) => i.request_id));
+        if (!reqDay) {
+          note('позиций по заявкам (request_id) в ответе календаря нет — переход в заявку не проверялся');
+        } else {
+          const rid = reqDay.items.find((i) => i.request_id).request_id;
+          await page.evaluate((h) => (location.hash = h), `#/calendar/${reqDay.date}`);
+          await settle(700);
+          await openAll();
+          await page.locator(`${screen} [data-flow-req][data-go="#/requests/${rid}"]`).first().click();
+          await settle(1500);
+          const hash = await page.evaluate(() => decodeURIComponent(location.hash));
+          const rq = await capture('kalendar-zayavka', 'заявка из календаря');
+          ok(hash === `#/requests/${rid}`, `строка «по заявке» открывает заявку ${rid}`);
+          if (has(`/orgs/${org.id}/requests/${rid}`)) ok(!rq.errCode && !rq.text.includes('Заявка не найдена'), 'карточка заявки открылась');
+          else note(`карточка заявки ${rid} не снята — на экране «Заявка не найдена», это ожидаемо`);
+          await page.locator('.topbar [data-back]').first().click();
+          await settle(900);
+          ok((await page.evaluate(() => location.hash)) === `#/calendar/${reqDay.date}`, '«Назад» из заявки возвращает в день календаря');
+        }
+
+        // месяц
+        await page.evaluate(() => (location.hash = '#/calendar'));
+        await settle(600);
+        await page.locator(`${screen} [data-act="cal-mode"][data-v="month"]`).click();
+        await settle(700);
+        const mon = await capture('kalendar-mesyac', 'календарь, месяц');
+        const inMonth = days.filter((d) => d.date.slice(0, 7) === days[0].date.slice(0, 7)).length;
+        ok(!mon.errCode && (await page.locator(`${screen} button.mc`).count()) === inMonth, `месяц: дней с остатком ${inMonth}`);
+        const tight = await page.locator(`${screen} .mc-bal`).evaluateAll((els) => els.filter((e) => e.scrollWidth > e.parentElement.clientWidth + 1).length);
+        ok(tight === 0, `месяц: остатки помещаются в ячейки${tight ? ` — не помещаются в ${tight}` : ''}`);
+        if (days[days.length - 1].date.slice(0, 7) !== days[0].date.slice(0, 7)) {
+          await page.locator(`${screen} .pn-btn[aria-label="Следующий месяц"]`).click();
+          await settle(700);
+          await capture('kalendar-mesyac-sleduyushchiy', 'календарь, следующий месяц');
+        }
+        await page.locator(`${screen} [data-act="cal-mode"][data-v="week"]`).click();
+        await settle(400);
+      }
     }
 
     // ---------- вкладка «Отчёты» ----------

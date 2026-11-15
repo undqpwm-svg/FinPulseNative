@@ -1236,6 +1236,92 @@ const PUSH_STUB = () => {
       await ctx.close();
     }
 
+    // ---------- календарь по контракту 5.3: просрочка, заявка, разрыв ----------
+    console.log('\n▶ Календарь: просроченные поступления, позиция по заявке, разрыв (5.3)');
+    {
+      const { ctx, page, errors, ctl } = await newCtx();
+      await page.goto(BASE);
+      await settle(page, 800);
+      await login(page, ctl);
+      const it = (direction, counterparty, article, amount, o = {}) => ({ direction, counterparty, article, note: null, amount, currency: 'KZT', amount_kzt: amount, source: direction === 'in' ? 'expected_receipt' : 'planned_payment', request_id: null, late: false, in_totals: true, preliminary: false, ...o });
+      const late = Array.from({ length: 12 }, (_, k) => it('in', `ТОО «Покупатель ${k + 1}»`, 'Оплата от покупателей', 100000 * (k + 1), { late: true, in_totals: false }));
+      const plan = [
+        [it('in', 'ТОО «Агро Трейд»', 'Оплата от покупателей', 400000), ...late,
+          it('out', null, 'Зарплата', 900000, { source: 'salary' }), it('out', null, null, 200000, { source: 'tax' }),
+          it('out', 'ТОО «Тест Поставщик»', 'Материалы', 1500000, { source: 'request', request_id: 'req_1' })],
+        [it('out', 'ТОО «Лизинг»', 'Лизинг', 3000000)],
+        [it('out', 'ТОО «Склад»', 'Аренда', 300000)],
+        [it('in', 'ТОО «Агро Трейд»', 'Оплата от покупателей', 2000000)],
+      ];
+      let opening = 5000000;
+      const days = Array.from({ length: 28 }, (_, i) => {
+        const items = plan[i] || [];
+        const inflow = items.filter((x) => x.direction === 'in' && x.in_totals).reduce((t, x) => t + x.amount_kzt, 0);
+        const outflow = items.filter((x) => x.direction === 'out').reduce((t, x) => t + x.amount_kzt, 0);
+        const d = { date: day(i), opening, inflow, outflow, closing: opening + inflow - outflow, gap: opening + inflow - outflow < 0, items };
+        opening = d.closing;
+        return d;
+      });
+      // разрыв: во второй день не хватает 200 000, на третий — уже 500 000; сервер называет первый день и его сумму
+      ctl.override = (call, { json }) => (call.path === '/orgs/org_test/calendar'
+        ? (json(200, { updated_at: T(TODAY, '10:15'), from: TODAY, to: day(27), opening: 5000000, threshold: 0, gap: { date: day(1), shortage: 200000 }, overdue_receipts: { amount: 7800000, count: 12 }, days }), true) : false);
+      await page.locator('.tabbar .tab[data-go="#/calendar"]').click();
+      await page.waitForSelector('.screen:not(.leaving) .day-card', { timeout: 8000 });
+      await settle(page, 500);
+      const scr = '.screen:not(.leaving)';
+      const strip = norm(await page.locator(`${scr} .gap-strip`).innerText());
+      ok(strip.includes('не хватит 200 000 ₸') && (await page.locator(`${scr} .gap-strip`).getAttribute('data-go')) === `#/calendar/${day(1)}`, 'плашка разрыва — день и сумма из gap ответа (200 000 ₸), как на главной');
+      const dayTxt = norm(await page.locator(`${scr} .day-card`).innerText());
+      ok(dayTxt.includes('+400 000 ₸') && (await page.locator(`${scr} [data-flows="in"] .flow`).count()) === 1 && dayTxt.includes('2 800 000 ₸'), 'просроченные поступления не входят в «Поступления» и в остаток на конец дня');
+      const off = page.locator(`${scr} [data-flows="off"]`);
+      const offTxt = norm(await off.innerText());
+      ok(offTxt.includes('Просроченные поступления') && offTxt.includes('7 800 000 ₸') && offTxt.includes('12 оплат — срок прошёл, деньги не пришли. В остаток дня не входят.') && !offTxt.includes('+'), 'блок «Просроченные поступления»: сумма, число оплат, «в остаток дня не входят», без «+»');
+      ok((await off.locator('.flow').count()) === 12 && (await off.locator('.flow:not([hidden])').count()) === 5 && norm(await off.locator('[data-act="flow-more"]').innerText()).includes('Показать все 12'), 'длинный список: пять самых крупных и «Показать все 12»');
+      ok(dayTxt.includes('Зарплата') && dayTxt.includes('Налоги') && !dayTxt.includes('Без контрагента'), 'позиция без контрагента: в заголовке статья или вид платежа («Зарплата», «Налоги»)');
+      await page.locator(`${scr} .day-card`).evaluate((el) => el.scrollIntoView({ block: 'start' }));
+      await shot(page, '21-kalendar-den');
+      await off.evaluate((el) => el.scrollIntoView({ block: 'center' }));
+      await shot(page, '22-kalendar-prosrochka');
+      await off.locator('[data-act="flow-more"]').click();
+      ok((await off.locator('.flow:not([hidden])').count()) === 12 && (await off.locator('[data-act="flow-more"]').count()) === 0, '«Показать все 12» раскрывает список');
+      // позиция по заявке ведёт в карточку заявки, «Назад» — обратно в календарь
+      const reqRow = page.locator(`${scr} [data-flow-req]`);
+      ok((await reqRow.count()) === 1 && norm(await reqRow.innerText()).includes('по заявке'), 'позиция с request_id — кнопка с меткой «по заявке»');
+      const before = ctl.calls.length;
+      await reqRow.click();
+      await page.waitForFunction(() => location.hash === '#/requests/req_1', null, { timeout: 8000 });
+      await settle(page, 900);
+      ok(ctl.calls.slice(before).some((c) => c.path === '/orgs/org_test/requests/req_1') && (await page.locator(`${scr} .err-state`).count()) === 0, 'нажатие открывает карточку заявки (GET /requests/req_1)');
+      await page.locator('.topbar [data-back]').click();
+      await settle(page, 900);
+      ok((await page.evaluate(() => location.hash)) === '#/calendar', '«Назад» из заявки возвращает в календарь');
+      // день разрыва: «Не хватает» — та же сумма, что в плашке
+      await page.locator(`${scr} .gap-strip`).click();
+      await settle(page, 700);
+      ok(norm(await page.locator(`${scr} .day-card`).innerText()).includes('Не хватает 200 000 ₸'), 'день разрыва: «Не хватает 200 000 ₸» — как в плашке');
+      noErrors(errors);
+      await ctx.close();
+    }
+    {
+      // 403 от общего прохода — про календарь, без слова «отчёт»
+      const { ctx, page, errors, ctl } = await newCtx();
+      await page.goto(BASE);
+      await settle(page, 800);
+      await login(page, ctl);
+      const scr = '.screen:not(.leaving)';
+      ctl.override = (call, { err }) => (call.path === '/orgs/org_test/calendar' ? (err(403, 'report_unavailable', 'Отчёт недоступен'), true) : false);
+      await page.locator('.tabbar .tab[data-go="#/calendar"]').click();
+      await page.waitForSelector(`${scr} .err-state`, { timeout: 8000 });
+      const gone = norm(await page.locator(`${scr} .err-state`).innerText());
+      ok(gone.includes('Календарь сейчас недоступен') && gone.includes('включает администратор ФинПульса') && !/[Оо]тчёт/.test(gone), '403 на календаре — «Календарь сейчас недоступен», без слова «отчёт»');
+      ctl.override = null;
+      await page.locator(`${scr} .err-state [data-act="retry"]`).click();
+      await settle(page, 900);
+      ok(await page.locator(`${scr} .wk-table`).isVisible(), '«Обновить» → календарь открылся');
+      noErrors(errors);
+      await ctx.close();
+    }
+
     // ---------- 3. 1С недоступна ----------
     console.log('\n▶ Учёт недоступен (503, 504, сеть)');
     {

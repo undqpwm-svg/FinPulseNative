@@ -402,6 +402,16 @@ button.mc:active { background: var(--milk); }
 .flow-main b { font-size: 14.5px; line-height: 1.3; }
 .flow-main small { font-size: 12.5px; color: var(--stone); line-height: 1.35; margin-top: 2px; }
 .flow-sum { font: 600 14.5px/1.3 var(--f-head); white-space: nowrap; padding-top: 1px; }
+.flow[hidden] { display: none; }
+button.flow { width: 100%; text-align: left; }
+button.flow:active { background: var(--paper); }
+.flow .tag-lav .ic { width: 12px; height: 12px; margin-right: -3px; }
+.flow-main b { overflow-wrap: anywhere; }
+.flow-off { margin-top: 14px; padding-top: 4px; border-top: 1px dashed var(--line); }
+.flow-off .fg-head b { color: var(--stone); }
+.fg-note { margin: 0 0 6px; font-size: 12.5px; line-height: 1.4; color: var(--stone); }
+.flow.off .flow-ic { background: #efebe3; color: var(--stone); }
+.flow.off .flow-sum { color: var(--stone); }
 .empty-mini { display: flex; align-items: center; gap: 8px; padding: 14px 4px 4px; font-size: 14px; color: var(--stone); }
 .empty-mini .ic { width: 18px; height: 18px; }
 .gap-hint { display: flex; gap: 10px; margin-top: 12px; padding: 12px; border-radius: 14px; background: #fff3ee; box-shadow: inset 0 0 0 1px rgba(181, 71, 58, 0.18); }

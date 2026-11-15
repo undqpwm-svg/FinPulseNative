@@ -38,9 +38,13 @@ export function moneyShort(n, { sign = false } = {}) {
 }
 
 // Компактное число в миллионах для ячеек календаря: 11,8
+// От миллиарда — без десятых и с разрядами («14 320», а не «14320,0»): иначе число не помещается в ячейку.
 export function mln(n) {
-  const v = (Math.round(n / 1e5) / 10).toFixed(1).replace('.', ',');
-  return (n < 0 ? '−' : '') + v.replace('-', '');
+  const m = Math.abs(n) / 1e6;
+  const v = m >= 999.95
+    ? Math.round(m).toString().replace(/\B(?=(\d{3})+(?!\d))/g, '\u202f')
+    : (Math.round(m * 10) / 10).toFixed(1).replace('.', ',');
+  return (n < 0 ? '−' : '') + v;
 }
 
 function dec(v) {

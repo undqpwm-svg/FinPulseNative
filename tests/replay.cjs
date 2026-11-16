@@ -301,7 +301,9 @@ function serve() {
         if (deps.length) ok(flat(await page.locator('.sheet-wrap .acc-dep-head').innerText()) === `Депозиты ${tenge(depSum)}`, `блок «Депозиты» под итогом, сумма ${tenge(depSum)}`);
         else ok((await page.locator('.sheet-wrap [data-acc="deposits"]').count()) === 0, 'депозитов в ответе нет — блока «Депозиты» нет');
         const hm = String(acc.updated_at || '').slice(11, 16);
-        ok(/^\d\d:\d\d$/.test(hm) && flat(await page.locator('.sheet-wrap [data-acc-at]').innerText()) === `на ${hm}`, `под заголовком — «на ${hm}»: время ответа по времени компании`);
+        ok(/^\d\d:\d\d$/.test(hm) && flat(await page.locator('.sheet-wrap [data-acc-at]').innerText()) === `На ${hm}`, `под заголовком — «На ${hm}»: время ответа по времени компании`);
+        const subBox = await page.locator('.sheet-wrap [data-acc-at]').evaluate((el) => el.getClientRects().length);
+        ok(subBox === 1, 'время в подписи не разорвано переносом строки');
         ok(!/null/.test(mainRows.concat(depRows).join(' ')), 'в подписях счетов нет «null»');
         const wide = await page.evaluate(() => {
           const b = document.querySelector('.sheet-wrap .sheet-body');

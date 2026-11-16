@@ -580,6 +580,7 @@ button.flow:active { background: var(--paper); }
 .acc-total span { font-weight: 600; }
 .acc-total b { font: 600 20px/1.2 var(--f-head); }
 .acc-name small:empty { display: none; }
+[data-acc-at] { white-space: nowrap; }
 .acc-total ~ .btn { flex-shrink: 0; } /* счетов много — лист прокручивается, кнопка не сжимается */
 .acc-none { padding: 14px 0; font-size: 14px; color: var(--stone); }
 /* депозиты — отдельный блок под итогом: в «Деньги на сегодня» не входят */

@@ -1725,7 +1725,7 @@ const PUSH_STUB = () => {
       });
       ok(order, 'порядок в листе: счета и кассы → «Итого» → «Депозиты»');
       ok(!/депозит(?! до востребования)/.test((await sheetText()).replace('Депозиты', '')), 'слово «депозит» к подписи счёта больше не дописывается');
-      ok(norm(await page.locator('.sheet-wrap [data-acc-sub]').innerText()).trim() === 'ТОО «Тест» · на 10:15', 'под заголовком — организация и «на 10:15»: время ответа (updated_at)');
+      ok(norm(await page.locator('.sheet-wrap [data-acc-sub]').innerText()).trim() === 'На 10:15 · ТОО «Тест»', 'под заголовком — «На 10:15» (время ответа, updated_at) и организация');
       await shot(page, '27-scheta-s-depozitami');
       await close();
 
@@ -1740,7 +1740,7 @@ const PUSH_STUB = () => {
       answer = (h) => h.json(200, { ...full, updated_at: `${TODAY}T08:15:00+03:00`, deposits_kzt: 0, items: full.items.filter((a) => !a.deposit).map((a) => (a.id === 'a3' ? { ...a, currency: null } : a)) });
       await open();
       ok((await page.locator('.sheet-wrap [data-acc="deposits"]').count()) === 0 && (await page.locator('.sheet-wrap .acc-row').count()) === 3, 'депозитов нет (deposits_kzt: 0) — блока «Депозиты» нет');
-      ok(norm(await page.locator('.sheet-wrap [data-acc-at]').innerText()) === 'на 08:15', 'время в подписи — время компании из ответа (08:15 при +03:00), не пояс телефона');
+      ok(norm(await page.locator('.sheet-wrap [data-acc-at]').innerText()) === 'На 08:15', 'время в подписи — время компании из ответа (08:15 при +03:00), не пояс телефона');
       const nocur = norm(await page.locator('.sheet-wrap [data-acc="main"] .acc-row').first().innerText()).replace(/\s+/g, ' ').trim();
       ok(nocur === 'Тест Банк Основной счёт · KZ•• 0001 3 300 000 ₸', `currency: null — подпись без валюты и без «null» (${nocur})`);
       await close();

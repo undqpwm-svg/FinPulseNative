@@ -1670,6 +1670,141 @@ const PUSH_STUB = () => {
       await ctx.close();
     }
 
+    // ---------- 2б. лист «Счета» (5.2) ----------
+    console.log('\n▶ Лист «Счета»: счета и кассы, итого, депозиты отдельно (5.2)');
+    {
+      // отчёты accounts и calendar в списке reports — вкладка «Отчёты» их не показывает и сама не запрашивает
+      const { ctx, page, errors, ctl } = await newCtx(devices['iPhone 13'], { orgs: [{ ...ORG, reports: ['cash-flow', 'accounts', 'calendar', 'debtors'] }] });
+      await page.goto(BASE);
+      await settle(page, 800);
+      await login(page, ctl);
+      const scr = '.screen:not(.leaving)';
+      const acc = (o) => ({ note: null, number_masked: null, currency: 'KZT', deposit: false, balance_kzt: o.balance, ...o });
+      // порядок сервера нарочно перемешан: касса, депозит, счёт, валютный счёт, валютный депозит
+      const full = {
+        updated_at: T(TODAY, '10:15'), date: TODAY, total_kzt: 5000000,
+        items: [
+          acc({ id: 'a1', type: 'cash', name: 'Касса офиса', balance: 200000 }),
+          acc({ id: 'a2', type: 'bank', name: 'Halyk Bank', note: 'Депозит до востребования', number_masked: 'KZ•• 7001', balance: 10000000, deposit: true }),
+          acc({ id: 'a3', type: 'bank', name: 'Тест Банк', note: 'Основной счёт', number_masked: 'KZ•• 0001', balance: 3300000 }),
+          acc({ id: 'a4', type: 'bank', name: 'Тест Банк', number_masked: 'KZ•• 0840', currency: 'USD', balance: 3000, balance_kzt: 1500000 }),
+          acc({ id: 'a5', type: 'bank', name: 'ForteBank', number_masked: 'KZ•• 7002', currency: 'USD', balance: 20000.5, balance_kzt: 10000250, deposit: true }),
+        ],
+      };
+      let answer = (h) => h.json(200, full);
+      let delay = 0;
+      ctl.override = (call, h) => {
+        if (call.path !== '/orgs/org_test/accounts') return false;
+        if (delay) setTimeout(() => answer(h), delay);
+        else answer(h);
+        return true;
+      };
+      const open = async () => {
+        await page.locator(`${scr} .hero`).click();
+        await settle(page, 700);
+      };
+      const close = async () => {
+        await page.locator('.sheet-wrap .btn[data-act="sheet-close"]').click();
+        await settle(page, 500);
+      };
+      const sheetText = async () => norm(await page.locator('.sheet-wrap .sheet-body').innerText());
+
+      await open();
+      const main = (await page.locator('.sheet-wrap [data-acc="main"] .acc-row').allInnerTexts()).map((x) => norm(x).replace(/\s+/g, ' ').trim());
+      ok(main.length === 3 && main[0].startsWith('Тест Банк Основной счёт') && main[1].includes('3 000 USD') && main[2].startsWith('Касса офиса'), `обычные счета: сначала банковские, затем касса; депозитов среди них нет (${main.join(' | ')})`);
+      ok(main[1].includes('1 500 000 ₸') && main[1].includes('KZ•• 0840'), 'валютный счёт: сумма в тенге, в подписи — остаток в валюте счёта и хвост номера');
+      ok(norm(await page.locator('.sheet-wrap .acc-total').innerText()).replace(/\s+/g, ' ').includes('Итого 5 000 000 ₸'), '«Итого» = total_kzt (5 000 000 ₸), депозиты в него не входят');
+      ok(norm(await page.locator(`${scr} .hero`).innerText()).includes('5 000 000'), '«Итого» в листе — та же цифра, что «Деньги на сегодня» на главной');
+      const dep = page.locator('.sheet-wrap [data-acc="deposits"]');
+      const depRows = (await dep.locator('.acc-row').allInnerTexts()).map((x) => norm(x).replace(/\s+/g, ' ').trim());
+      ok(depRows.length === 2 && depRows[0].startsWith('Halyk Bank') && depRows[1].startsWith('ForteBank') && depRows[1].includes('20 000,50 USD'), `депозиты — отдельным блоком, в порядке сервера (${depRows.join(' | ')})`);
+      ok(norm(await dep.locator('.acc-dep-head').innerText()).replace(/\s+/g, ' ').includes('Депозиты 20 000 250 ₸') && norm(await dep.innerText()).includes('В итог и в «Деньги на сегодня» не входят'), 'у блока — сумма депозитов (20 000 250 ₸) и подпись, что в итог они не входят');
+      const order = await page.evaluate(() => {
+        const y = (q) => document.querySelector(q).getBoundingClientRect().top;
+        return y('.sheet-wrap [data-acc="main"]') < y('.sheet-wrap .acc-total') && y('.sheet-wrap .acc-total') < y('.sheet-wrap [data-acc="deposits"]');
+      });
+      ok(order, 'порядок в листе: счета и кассы → «Итого» → «Депозиты»');
+      ok(!/депозит(?! до востребования)/.test((await sheetText()).replace('Депозиты', '')), 'слово «депозит» к подписи счёта больше не дописывается');
+      await shot(page, '27-scheta-s-depozitami');
+      await close();
+
+      // без депозитов — блока нет
+      answer = (h) => h.json(200, { ...full, items: full.items.filter((a) => !a.deposit) });
+      await open();
+      ok((await page.locator('.sheet-wrap [data-acc="deposits"]').count()) === 0 && (await page.locator('.sheet-wrap .acc-row').count()) === 3, 'депозитов нет — блока «Депозиты» нет');
+      await close();
+
+      // счетов нет совсем
+      answer = (h) => h.json(200, { updated_at: T(TODAY, '10:15'), date: TODAY, items: [], total_kzt: 0 });
+      await open();
+      ok((await sheetText()).includes('Счетов и касс с остатком нет') && norm(await page.locator('.sheet-wrap .acc-total').innerText()).replace(/\s+/g, ' ').includes('Итого 0 ₸'), 'пустой список — «Счетов и касс с остатком нет», итого 0 ₸');
+      await close();
+
+      // 501: база остатков ещё не отдаёт — спокойный текст в листе, не ошибка
+      answer = (h) => h.err(501, 'not_implemented', 'Раздел будет позже');
+      await open();
+      let off = await sheetText();
+      ok((await page.locator('.sheet-wrap [data-acc-off="later"]').count()) === 1 && off.includes('Остатки по счетам появятся после обновления базы'), '501 → «Остатки по счетам появятся после обновления базы»');
+      ok((await page.locator('.toast.show').count()) === 0 && (await page.locator('.sheet-wrap .acc-row, .sheet-wrap .acc-total').count()) === 0 && !/ошибк/i.test(off), '501: без всплывающей ошибки, без пустого списка и «Итого»');
+      await shot(page, '28-scheta-posle-obnovleniya-bazy');
+      await close();
+
+      // 403: раздел выключен в 1С или нет прав
+      answer = (h) => h.err(403, 'report_unavailable', 'Отчёт недоступен');
+      await open();
+      off = await sheetText();
+      ok((await page.locator('.sheet-wrap [data-acc-off="off"]').count()) === 1 && off.includes('Остатки по счетам сейчас недоступны') && off.includes('включает администратор ФинПульса') && !/[Оо]тчёт/.test(off), '403 report_unavailable → «Остатки по счетам сейчас недоступны», без слова «отчёт»');
+      ok((await page.locator('.toast.show').count()) === 0, '403: без всплывающей ошибки');
+      await close();
+
+      // 503 — как раньше: всплывающая ошибка, лист не открывается
+      answer = (h) => h.err(503, 'source_unavailable', 'Нет связи с учётом компании', undefined, { 'Retry-After': '60' });
+      await open();
+      ok((await page.locator('.sheet-wrap').count()) === 0 && norm(await page.locator('.toast').innerText()).includes('1С сейчас недоступна'), '503 → всплывающее «1С сейчас недоступна», лист не открывается');
+      await page.waitForFunction(() => !document.querySelector('.toast.show'), null, { timeout: 6000 });
+
+      // учёт отвечает не сразу: два нажатия подряд — один запрос
+      answer = (h) => h.json(200, full);
+      delay = 900;
+      const before = ctl.calls.length;
+      await page.locator(`${scr} .hero`).click();
+      await page.locator(`${scr} .hero`).click();
+      await page.waitForSelector('.sheet-wrap [data-acc="main"]', { timeout: 8000 });
+      await settle(page, 400);
+      ok(ctl.calls.slice(before).filter((c) => c.path === '/orgs/org_test/accounts').length === 1, 'два нажатия, пока учёт отвечает, — один запрос /accounts');
+      await close();
+      delay = 0;
+      ctl.override = null;
+
+      // вкладка «Отчёты»: accounts и calendar из списка reports пропущены
+      await page.locator('.tabbar .tab[data-go="#/reports"]').click();
+      await settle(page, 900);
+      const segs = (await page.locator(`${scr} .seg-btn`).allInnerTexts()).map((x) => norm(x).trim());
+      ok(JSON.stringify(segs) === JSON.stringify(['ДДС', 'Должники']), `accounts и calendar в reports — на вкладке «Отчёты» только известные отчёты (${segs.join(' · ')})`);
+      ok((await page.locator(`${scr} .err-state`).count()) === 0 && !ctl.calls.some((c) => /\/reports\/(accounts|calendar)/.test(c.path)), 'пустой или сломанной плитки нет, запросы /reports/accounts и /reports/calendar не уходят');
+      noErrors(errors);
+      await ctx.close();
+    }
+    {
+      // в списке reports только accounts и calendar — вкладка «Отчёты» как без отчётов: заглушка, не пустой переключатель
+      const { ctx, page, errors, ctl } = await newCtx(devices['iPhone 13'], { orgs: [{ ...ORG, reports: ['accounts', 'calendar'] }] });
+      await page.goto(BASE);
+      await settle(page, 800);
+      await login(page, ctl);
+      await page.locator('.tabbar .tab[data-go="#/reports"]').click();
+      await settle(page, 900);
+      const txt = norm(await page.locator('.screen:not(.leaving) .scroll').innerText());
+      ok(txt.includes('Раздел появится в следующей версии') && (await page.locator('.screen:not(.leaving) .seg').count()) === 0 && !ctl.calls.some((c) => /\/reports\//.test(c.path)), 'в reports только accounts и calendar — заглушка вкладки, запросов отчётов нет');
+      // обычный ответ имитатора (без депозитов) — лист как раньше
+      await page.locator('.tabbar .tab[data-go="#/home"]').click();
+      await settle(page, 700);
+      await page.locator('.screen:not(.leaving) .hero').click();
+      await settle(page, 700);
+      ok((await page.locator('.sheet-wrap .acc-row').count()) === 2 && (await page.locator('.sheet-wrap [data-acc="deposits"]').count()) === 0, 'ответ без депозитов — два счёта и «Итого», как раньше');
+      noErrors(errors);
+      await ctx.close();
+    }
+
     // ---------- 3. 1С недоступна ----------
     console.log('\n▶ Учёт недоступен (503, 504, сеть)');
     {

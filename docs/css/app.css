@@ -579,6 +579,21 @@ button.flow:active { background: var(--paper); }
 .acc-total { display: flex; justify-content: space-between; align-items: baseline; margin: 6px 0 18px; padding-top: 14px; border-top: 1.5px solid var(--ink); }
 .acc-total span { font-weight: 600; }
 .acc-total b { font: 600 20px/1.2 var(--f-head); }
+.acc-name small:empty { display: none; }
+.acc-total ~ .btn { flex-shrink: 0; } /* счетов много — лист прокручивается, кнопка не сжимается */
+.acc-none { padding: 14px 0; font-size: 14px; color: var(--stone); }
+/* депозиты — отдельный блок под итогом: в «Деньги на сегодня» не входят */
+.acc-dep { margin: 0 0 18px; padding: 14px 14px 4px; border-radius: 16px; background: var(--milk); }
+.acc-dep-head { display: flex; justify-content: space-between; align-items: baseline; }
+.acc-dep-head span { font-weight: 600; }
+.acc-dep-head b { font: 600 16px/1.2 var(--f-head); white-space: nowrap; }
+.acc-dep-note { margin-top: 2px; font-size: 12.5px; color: var(--stone); }
+.acc-dep .acc-ic { background: var(--card); }
+.acc-off { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 22px 8px 24px; text-align: center; }
+.acc-off-ic { width: 48px; height: 48px; border-radius: 16px; display: grid; place-items: center; background: var(--lav); margin-bottom: 4px; }
+.acc-off-ic .ic { width: 24px; height: 24px; }
+.acc-off b { font: 600 17px/1.3 var(--f-head); }
+.acc-off span:not(.acc-off-ic) { font-size: 14px; line-height: 1.45; color: var(--stone); }
 
 .pdf-bar { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
 .pdf-bar b { flex: 1; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

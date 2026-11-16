@@ -190,7 +190,13 @@ async function runFlow(browser, name, opts, isPhone) {
 
   await tap(page, '.hero');
   await settle(page, 450);
-  ok(await page.locator('.sheet .acc-row').count() === 3, 'шторка со счетами открывается');
+  ok(await page.locator('.sheet [data-acc="main"] .acc-row').count() === 3, 'шторка со счетами открывается');
+  ok(await page.locator('.sheet [data-acc="deposits"] .acc-row').count() === 1 && (await page.locator('.sheet [data-acc="deposits"]').innerText()).includes('не входят'), 'депозит — отдельным блоком под «Итого», с подписью «не входят»');
+  {
+    const num = (t) => String(t).replace(/[^\d]/g, '');
+    const total = num(await page.locator('.sheet .acc-total b').innerText());
+    ok(total === '12480000' && num(await page.locator('.hero .bm-num').innerText()) === total, `«Итого» без депозита — 12 480 000 ₸, как «Деньги на сегодня» (${total})`);
+  }
   if (isPhone) await shot(page, '06-scheta');
   await tap(page, '[data-act="sheet-close"].btn');
   await settle(page, 350);

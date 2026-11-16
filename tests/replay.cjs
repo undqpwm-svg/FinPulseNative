@@ -1,7 +1,8 @@
 // Прогон настоящих ответов сервера через приложение — без входа и без обращений к серверу.
 // Ответы API, снятые заранее (например, Посредником с api-test и тестовой базы), лежат в папке файлами JSON.
 // Приложение открывается в браузере, все его запросы к API подменяются: вход — условный, остальные GET — из папки.
-// Сценарий проходит календарь (если снят GET /orgs/{org}/calendar), вкладку «Отчёты» (все отчёты из reports в /orgs),
+// Сценарий проходит лист «Счета» (если снят GET /orgs/{org}/accounts), календарь (если снят GET /orgs/{org}/calendar),
+// вкладку «Отчёты» (все отчёты из reports в /orgs),
 // список проектов, отборы и карточки, для которых есть снятые ответы; сохраняет снимки и текст каждого экрана —
 // по тексту цифры сверяются с 1С. Ответ календаря заодно проверяется на арифметику контракта 5.3.
 //
@@ -225,6 +226,96 @@ function serve() {
       ok((debtLink > 0) === (org.reports || []).includes('debtors'), `«Нам должны» ${debtLink ? 'ведёт в «Должники»' : 'без ссылки'} — как в списке reports`);
     } else {
       note('главная не проверялась: ответ /summary не снят');
+    }
+
+    // ---------- счета (5.2) ----------
+    const ACC = `/orgs/${org.id}/accounts`;
+    const accDump = dumps.find((d) => d.path === ACC);
+    if (!accDump) {
+      note('лист «Счета» не проверялся: ответ /accounts не снят');
+    } else if (!has(`/orgs/${org.id}/summary`)) {
+      note('лист «Счета» не проверялся: он открывается с главной, а ответ /summary не снят');
+    } else {
+      console.log('\n▶ Лист «Счета» (5.2)');
+      await page.locator(`${screen} .hero`).click();
+      await settle(1200);
+      const sheet = page.locator('.sheet-wrap .sheet-body');
+      const opened = (await sheet.count()) === 1;
+      n += 1;
+      const base = `${String(n).padStart(2, '0')}-scheta`;
+      await page.screenshot({ path: path.join(OUT, `${base}.png`) });
+      const text = opened ? norm(await sheet.innerText()) : '';
+      fs.writeFileSync(path.join(OUT, `${base}.txt`), text, 'utf8');
+      if (accDump.status === 501) {
+        ok(opened && (await page.locator('.sheet-wrap [data-acc-off="later"]').count()) === 1, 'ответ 501 — «Остатки по счетам появятся после обновления базы»');
+      } else if (accDump.status === 403) {
+        ok(opened && (await page.locator('.sheet-wrap [data-acc-off="off"]').count()) === 1, 'ответ 403 — «Остатки по счетам сейчас недоступны»');
+      } else if (accDump.status !== 200) {
+        ok(!opened, `ответ ${accDump.status} — лист не открылся, ошибка всплывающим сообщением`);
+      } else {
+        const acc = accDump.body;
+        const items = acc.items || [];
+        const tenge = (v) => `${v < 0 ? '−' : ''}${Math.round(Math.abs(v)).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ' ')} ₸`;
+        const near = (a, b) => Math.abs(a - b) < 0.011;
+        const kzt = (i) => Number(i.balance_kzt != null ? i.balance_kzt : i.balance) || 0;
+        const sumOf = (arr) => arr.reduce((t, i) => t + kzt(i), 0);
+        const deps = items.filter((i) => i.deposit === true);
+        const main = items.filter((i) => i.deposit !== true);
+        const flat = (t) => norm(t).replace(/\s+/g, ' ').trim();
+
+        // ----- сам ответ против контракта 5.2 и решения «депозиты в итог не входят» (расхождение — вопрос к серверу) -----
+        const badItems = items.filter((i) => !['bank', 'cash'].includes(i.type) || !i.name || typeof i.balance !== 'number' || typeof i.balance_kzt !== 'number' || typeof i.deposit !== 'boolean' || !i.currency);
+        ok(!badItems.length && typeof acc.total_kzt === 'number', `ответ: у каждого из ${items.length} счетов есть type, name, currency, balance, balance_kzt, deposit; total_kzt — число${badItems.length ? ` — не так у ${badItems.length}` : ''}`);
+        console.log(`  счетов и касс: ${main.length} (банк ${main.filter((i) => i.type === 'bank').length}, касса ${main.filter((i) => i.type === 'cash').length}), депозитов: ${deps.length}, валютных: ${items.filter((i) => i.currency !== 'KZT').length}, с нулём: ${items.filter((i) => kzt(i) === 0).length}, с минусом: ${items.filter((i) => kzt(i) < 0).length}`);
+        if (near(sumOf(main), acc.total_kzt)) ok(true, `ответ: total_kzt (${tenge(acc.total_kzt)}) = сумме счетов и касс без депозитов`);
+        else if (deps.length && near(sumOf(items), acc.total_kzt)) ok(false, `ответ: total_kzt (${tenge(acc.total_kzt)}) включает депозиты (${tenge(sumOf(deps))}) — по решению они в итог не входят; вопрос к 1С`);
+        else ok(false, `ответ: total_kzt (${tenge(acc.total_kzt)}) не равен сумме счетов без депозитов (${tenge(sumOf(main))}); с депозитами — ${tenge(sumOf(items))}`);
+        const sumDump = dumps.find((d) => d.path === `/orgs/${org.id}/summary` && d.status === 200);
+        if (sumDump && sumDump.body.money) {
+          const m = sumDump.body.money;
+          ok(near(m.total, acc.total_kzt), `ответ: total_kzt = money.total сводки (${tenge(m.total)}) — «Итого» совпадает с «Деньги на сегодня»`);
+          const bank = sumOf(main.filter((i) => i.type === 'bank'));
+          const cash = sumOf(main.filter((i) => i.type === 'cash'));
+          ok(near(m.bank, bank) && near(m.cash, cash), `ответ: «Банк» и «Касса» сводки (${tenge(m.bank)} и ${tenge(m.cash)}) = счетам и кассам листа без депозитов (${tenge(bank)} и ${tenge(cash)})`);
+        }
+
+        // ----- экран -----
+        ok(opened, 'лист «Счета» открылся');
+        const junk = text.match(/NaN|Infinity|undefined|Invalid Date|\[object Object\]|\bnull\b/g);
+        ok(!junk, `лист «Счета»: в тексте нет мусора${junk ? ` — найдено: ${[...new Set(junk)].join(', ')}` : ''}`);
+        const mainRows = (await page.locator('.sheet-wrap [data-acc="main"] .acc-row').allInnerTexts()).map(flat);
+        const depRows = (await page.locator('.sheet-wrap [data-acc="deposits"] .acc-row').allInnerTexts()).map(flat);
+        ok(mainRows.length === main.length && depRows.length === deps.length, `в листе ${mainRows.length} счетов и касс и ${depRows.length} депозитов — как в ответе (${main.length} и ${deps.length})`);
+        const lost = items.filter((i) => !(i.deposit === true ? depRows : mainRows).some((r) => r.includes(flat(i.name)) && r.includes(tenge(kzt(i)))));
+        ok(!lost.length, `каждый счёт показан с названием и остатком в тенге${lost.length ? ` — не найдено: ${lost.length}` : ''}`);
+        const cur = items.filter((i) => i.currency !== 'KZT');
+        if (cur.length) ok(cur.every((i) => (i.deposit === true ? depRows : mainRows).some((r) => r.includes(flat(i.name)) && r.includes(` ${i.currency}`))), `валютные счета (${cur.length}): в подписи остаток в валюте счёта`);
+        ok(flat(await page.locator('.sheet-wrap .acc-total').innerText()) === `Итого ${tenge(acc.total_kzt)}`, `«Итого» в листе — ${tenge(acc.total_kzt)}`);
+        if (sumDump) ok(norm(await page.locator(`${screen} .hero .bm-num`).innerText()).replace(/\s/g, '') === tenge(acc.total_kzt).replace(/[\s₸]/g, ''), '«Итого» в листе и «Деньги на сегодня» на главной — одна цифра');
+        if (deps.length) ok(flat(await page.locator('.sheet-wrap .acc-dep-head').innerText()) === `Депозиты ${tenge(sumOf(deps))}`, `блок «Депозиты» под итогом, сумма ${tenge(sumOf(deps))}`);
+        else ok((await page.locator('.sheet-wrap [data-acc="deposits"]').count()) === 0, 'депозитов в ответе нет — блока «Депозиты» нет');
+        const wide = await page.evaluate(() => {
+          const b = document.querySelector('.sheet-wrap .sheet-body');
+          return b.scrollWidth > b.clientWidth + 1;
+        });
+        ok(!wide, 'лист «Счета»: нет горизонтальной прокрутки');
+        const long = await page.evaluate(() => {
+          const b = document.querySelector('.sheet-wrap .sheet-body');
+          if (b.scrollHeight <= b.clientHeight + 40) return false;
+          b.scrollTop = b.scrollHeight;
+          return true;
+        });
+        if (long) {
+          await settle(300);
+          await page.screenshot({ path: path.join(OUT, `${base}-niz.png`) });
+          ok(await page.locator('.sheet-wrap .btn[data-act="sheet-close"]').isVisible(), 'длинный список счетов прокручивается до кнопки «Понятно»');
+        }
+      }
+      if (await page.locator('.sheet-wrap').count()) {
+        await page.locator('.sheet-wrap .sheet-backdrop').click({ position: { x: 10, y: 10 } });
+        await settle(600);
+      }
+      await page.waitForFunction(() => !document.querySelector('.toast.show'), null, { timeout: 8000 }).catch(() => {});
     }
 
     // ---------- календарь ----------

@@ -212,7 +212,9 @@ export async function home(id) {
 
 export async function accounts(id) {
   const o = org(id);
-  return { orgName: o.name, total: S.opening(o).total, items: o.accounts.map((a) => ({ name: a.name, note: a.note, type: a.type, amount: a.amount })) };
+  const row = (a) => ({ name: a.name, note: a.note, type: a.type, amount: a.amount, deposit: !!a.deposit });
+  const deposits = o.accounts.filter((a) => a.deposit).map(row);
+  return { orgName: o.name, total: S.opening(o).total, items: o.accounts.filter((a) => !a.deposit).map(row), deposits, depositsTotal: sum(deposits, (a) => a.amount) };
 }
 
 // ---------- календарь ----------

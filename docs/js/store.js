@@ -92,8 +92,9 @@ export const horizon = () => data.horizonDays || 28;
 export const org = (id = state.orgId) => data.orgs.find((o) => o.id === id) || data.orgs[0];
 
 export function opening(o = org()) {
-  const bank = sum(o.accounts.filter((a) => a.type === 'bank'), (a) => a.amount);
-  const cash = sum(o.accounts.filter((a) => a.type === 'cash'), (a) => a.amount);
+  // депозиты в «Деньги на сегодня» не входят: в листе «Счета» они отдельным блоком под итогом
+  const bank = sum(o.accounts.filter((a) => a.type === 'bank' && !a.deposit), (a) => a.amount);
+  const cash = sum(o.accounts.filter((a) => a.type === 'cash' && !a.deposit), (a) => a.amount);
   return { bank, cash, total: bank + cash };
 }
 

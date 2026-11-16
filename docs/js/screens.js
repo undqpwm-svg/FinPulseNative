@@ -1130,22 +1130,47 @@ actions['push-enable'] = async () => {
   if (location.hash.startsWith('#/profile')) nav.rerender();
 };
 
+// Лист «Счета»: счета и кассы, «Итого» (та же цифра, что «Деньги на сегодня» на главной), ниже — депозиты, которые
+// в итог не входят. Остатков база ещё не отдаёт (501) или раздел выключен в 1С (403) — спокойный текст в листе.
+const accRow = (a) => `<div class="acc-row${a.deposit ? ' dep' : ''}">
+  <span class="acc-ic ${a.type === 'cash' ? 'cash' : 'bank'}">${a.type === 'cash' ? I.cash : I.bank}</span>
+  <span class="acc-name"><b>${H(a.name)}</b><small>${H(a.note || '')}</small></span>
+  <b class="acc-sum">${money(a.amount)}</b>
+</div>`;
+
+function accountsOff(kind, title, text = '') {
+  openSheet(`<div class="sheet-title">Деньги на сегодня</div>
+    <div class="acc-off" data-acc-off="${kind}">
+      <span class="acc-off-ic">${I.info}</span>
+      <b>${title}</b>${text ? `<span>${text}</span>` : ''}
+    </div>
+    <button class="btn btn-secondary btn-block" data-act="sheet-close">Понятно</button>`);
+}
+
 actions.accounts = async () => {
+  if (ui.accLoading) return; // второй тап, пока учёт отвечает, второго запроса не шлёт
+  ui.accLoading = true;
   try {
     const d = await api.accounts(api.orgId());
+    const deps = d.deposits || [];
     openSheet(`<div class="sheet-title">Деньги на сегодня</div>
       <div class="sheet-sub">${H(d.orgName || '')}</div>
-      <div class="acc-list">
-        ${d.items.map((a) => `<div class="acc-row">
-          <span class="acc-ic ${a.type === 'cash' ? 'cash' : 'bank'}">${a.type === 'cash' ? I.cash : I.bank}</span>
-          <span class="acc-name"><b>${H(a.name)}</b><small>${H(a.note || '')}</small></span>
-          <b class="acc-sum">${money(a.amount)}</b>
-        </div>`).join('')}
+      <div class="acc-list" data-acc="main">
+        ${d.items.length ? d.items.map(accRow).join('') : '<div class="acc-none">Счетов и касс с остатком нет</div>'}
       </div>
       <div class="acc-total"><span>Итого</span><b>${money(d.total)}</b></div>
+      ${deps.length ? `<div class="acc-dep" data-acc="deposits">
+        <div class="acc-dep-head"><span>Депозиты</span><b>${money(d.depositsTotal)}</b></div>
+        <div class="acc-dep-note">В итог и в «Деньги на сегодня» не входят</div>
+        <div class="acc-list">${deps.map(accRow).join('')}</div>
+      </div>` : ''}
       <button class="btn btn-secondary btn-block" data-act="sheet-close">Понятно</button>`);
   } catch (e) {
-    actionError(e);
+    if (isLater(e)) accountsOff('later', 'Остатки по счетам появятся после обновления базы');
+    else if (e instanceof ApiError && (e.code === 'report_unavailable' || e.code === 'forbidden')) accountsOff('off', 'Остатки по счетам сейчас недоступны', 'Доступ к разделам приложения включает администратор ФинПульса в 1С вашей компании.');
+    else actionError(e);
+  } finally {
+    ui.accLoading = false;
   }
 };
 

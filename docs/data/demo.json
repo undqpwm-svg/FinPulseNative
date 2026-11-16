@@ -16,7 +16,8 @@
       "accounts": [
         { "name": "Halyk Bank", "note": "Основной счёт · KZ•• 4521", "type": "bank", "amount": 8940000 },
         { "name": "ForteBank", "note": "Зарплатный проект · KZ•• 1187", "type": "bank", "amount": 2890000 },
-        { "name": "Касса", "note": "Офис на Рыскулова", "type": "cash", "amount": 650000 }
+        { "name": "Касса", "note": "Офис на Рыскулова", "type": "cash", "amount": 650000 },
+        { "name": "Halyk Bank", "note": "Депозит до 15 марта · KZ•• 9034", "type": "bank", "amount": 5000000, "deposit": true }
       ],
       "flows": [
         { "d": 0, "type": "in", "who": "ТОО «Агро Трейд Казахстан»", "article": "Оплата от покупателей", "note": "Перевозка зерна, акт № 312", "amount": 2450000 },

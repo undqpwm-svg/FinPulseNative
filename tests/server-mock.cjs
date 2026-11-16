@@ -1682,7 +1682,7 @@ const PUSH_STUB = () => {
       const acc = (o) => ({ note: null, number_masked: null, currency: 'KZT', deposit: false, balance_kzt: o.balance, ...o });
       // порядок сервера нарочно перемешан: касса, депозит, счёт, валютный счёт, валютный депозит
       const full = {
-        updated_at: T(TODAY, '10:15'), date: TODAY, total_kzt: 5000000,
+        updated_at: T(TODAY, '10:15'), date: TODAY, total_kzt: 5000000, deposits_kzt: 20000250,
         items: [
           acc({ id: 'a1', type: 'cash', name: 'Касса офиса', balance: 200000 }),
           acc({ id: 'a2', type: 'bank', name: 'Halyk Bank', note: 'Депозит до востребования', number_masked: 'KZ•• 7001', balance: 10000000, deposit: true }),
@@ -1725,13 +1725,24 @@ const PUSH_STUB = () => {
       });
       ok(order, 'порядок в листе: счета и кассы → «Итого» → «Депозиты»');
       ok(!/депозит(?! до востребования)/.test((await sheetText()).replace('Депозиты', '')), 'слово «депозит» к подписи счёта больше не дописывается');
+      ok(norm(await page.locator('.sheet-wrap [data-acc-sub]').innerText()).trim() === 'ТОО «Тест» · на 10:15', 'под заголовком — организация и «на 10:15»: время ответа (updated_at)');
       await shot(page, '27-scheta-s-depozitami');
       await close();
 
-      // без депозитов — блока нет
-      answer = (h) => h.json(200, { ...full, items: full.items.filter((a) => !a.deposit) });
+      // сервер без поля deposits_kzt — сумму депозитов приложение складывает само
+      answer = (h) => h.json(200, { ...full, deposits_kzt: undefined });
       await open();
-      ok((await page.locator('.sheet-wrap [data-acc="deposits"]').count()) === 0 && (await page.locator('.sheet-wrap .acc-row').count()) === 3, 'депозитов нет — блока «Депозиты» нет');
+      ok(norm(await page.locator('.sheet-wrap .acc-dep-head').innerText()).replace(/\s+/g, ' ').includes('Депозиты 20 000 250 ₸'), 'поля deposits_kzt нет — сумма депозитов сложена из счетов (20 000 250 ₸)');
+      await close();
+
+      // без депозитов — блока нет
+      // время компании +03:00, телефон в Алматы (+05:00): в подписи — время из ответа, без пересчёта; валюта null
+      answer = (h) => h.json(200, { ...full, updated_at: `${TODAY}T08:15:00+03:00`, deposits_kzt: 0, items: full.items.filter((a) => !a.deposit).map((a) => (a.id === 'a3' ? { ...a, currency: null } : a)) });
+      await open();
+      ok((await page.locator('.sheet-wrap [data-acc="deposits"]').count()) === 0 && (await page.locator('.sheet-wrap .acc-row').count()) === 3, 'депозитов нет (deposits_kzt: 0) — блока «Депозиты» нет');
+      ok(norm(await page.locator('.sheet-wrap [data-acc-at]').innerText()) === 'на 08:15', 'время в подписи — время компании из ответа (08:15 при +03:00), не пояс телефона');
+      const nocur = norm(await page.locator('.sheet-wrap [data-acc="main"] .acc-row').first().innerText()).replace(/\s+/g, ' ').trim();
+      ok(nocur === 'Тест Банк Основной счёт · KZ•• 0001 3 300 000 ₸', `currency: null — подпись без валюты и без «null» (${nocur})`);
       await close();
 
       // счетов нет совсем

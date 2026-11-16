@@ -191,6 +191,7 @@ async function runFlow(browser, name, opts, isPhone) {
   await tap(page, '.hero');
   await settle(page, 450);
   ok(await page.locator('.sheet [data-acc="main"] .acc-row').count() === 3, 'шторка со счетами открывается');
+  ok(/ · на \d\d:\d\d$/.test((await page.locator('.sheet [data-acc-sub]').innerText()).trim()), 'под заголовком листа — «на ЧЧ:ММ»');
   ok(await page.locator('.sheet [data-acc="deposits"] .acc-row').count() === 1 && (await page.locator('.sheet [data-acc="deposits"]').innerText()).includes('не входят'), 'депозит — отдельным блоком под «Итого», с подписью «не входят»');
   {
     const num = (t) => String(t).replace(/[^\d]/g, '');

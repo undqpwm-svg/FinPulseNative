@@ -214,7 +214,7 @@ export async function accounts(id) {
   const o = org(id);
   const row = (a) => ({ name: a.name, note: a.note, type: a.type, amount: a.amount, deposit: !!a.deposit });
   const deposits = o.accounts.filter((a) => a.deposit).map(row);
-  return { orgName: o.name, total: S.opening(o).total, items: o.accounts.filter((a) => !a.deposit).map(row), deposits, depositsTotal: sum(deposits, (a) => a.amount) };
+  return { orgName: o.name, asOf: `${iso(S.today())}T${S.data.updatedAt || '08:30'}:00`, total: S.opening(o).total, items: o.accounts.filter((a) => !a.deposit).map(row), deposits, depositsTotal: sum(deposits, (a) => a.amount) };
 }
 
 // ---------- календарь ----------

@@ -364,7 +364,8 @@ const agingDto = (a) => ({ days_0_30: (a && a.days_0_30) || 0, days_31_60: (a &&
 
 // ---------- счета (5.2) ----------
 // «Итого» — total_kzt сервера как есть: та же цифра, что «Деньги на сегодня» на главной. Депозиты (deposit: true)
-// в неё не входят и идут отдельным списком под итогом; их сумму складываем сами — в контракте такого поля нет.
+// в неё не входят и идут отдельным списком под итогом; их сумма — deposits_kzt, а если сервер поля не прислал, складываем сами.
+// Остатки — на момент ответа (updated_at, время компании), как отчёт «Баланс» в 1С.
 // Порядок внутри списков — как прислал сервер, только кассы после банковских счетов.
 export async function accounts(id) {
   const [r, org] = await Promise.all([getJSON(orgPath(id, '/accounts')), orgInfo(id)]);
@@ -379,10 +380,11 @@ export async function accounts(id) {
   const deposits = byType(all.filter((a) => a.deposit));
   return {
     orgName: org.name,
+    asOf: r.updated_at || null,
     total: r.total_kzt,
     items: byType(all.filter((a) => !a.deposit)),
     deposits,
-    depositsTotal: deposits.reduce((t, a) => t + a.amount, 0),
+    depositsTotal: typeof r.deposits_kzt === 'number' ? r.deposits_kzt : deposits.reduce((t, a) => t + a.amount, 0),
   };
 }
 

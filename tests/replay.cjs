@@ -264,12 +264,17 @@ function serve() {
         const flat = (t) => norm(t).replace(/\s+/g, ' ').trim();
 
         // ----- сам ответ против контракта 5.2 и решения «депозиты в итог не входят» (расхождение — вопрос к серверу) -----
-        const badItems = items.filter((i) => !['bank', 'cash'].includes(i.type) || !i.name || typeof i.balance !== 'number' || typeof i.balance_kzt !== 'number' || typeof i.deposit !== 'boolean' || !i.currency);
-        ok(!badItems.length && typeof acc.total_kzt === 'number', `ответ: у каждого из ${items.length} счетов есть type, name, currency, balance, balance_kzt, deposit; total_kzt — число${badItems.length ? ` — не так у ${badItems.length}` : ''}`);
-        console.log(`  счетов и касс: ${main.length} (банк ${main.filter((i) => i.type === 'bank').length}, касса ${main.filter((i) => i.type === 'cash').length}), депозитов: ${deps.length}, валютных: ${items.filter((i) => i.currency !== 'KZT').length}, с нулём: ${items.filter((i) => kzt(i) === 0).length}, с минусом: ${items.filter((i) => kzt(i) < 0).length}`);
+        const badItems = items.filter((i) => !['bank', 'cash'].includes(i.type) || !i.name || typeof i.balance !== 'number' || typeof i.balance_kzt !== 'number' || typeof i.deposit !== 'boolean' || !('currency' in i));
+        ok(!badItems.length && typeof acc.total_kzt === 'number', `ответ: у каждого из ${items.length} счетов есть type, name, currency (может быть null), balance, balance_kzt, deposit; total_kzt — число${badItems.length ? ` — не так у ${badItems.length}` : ''}`);
+        console.log(`  счетов и касс: ${main.length} (банк ${main.filter((i) => i.type === 'bank').length}, касса ${main.filter((i) => i.type === 'cash').length}), депозитов: ${deps.length}, валютных: ${items.filter((i) => i.currency && i.currency !== 'KZT').length}, без валюты: ${items.filter((i) => !i.currency).length}, с нулём: ${items.filter((i) => kzt(i) === 0).length}, с минусом: ${items.filter((i) => kzt(i) < 0).length}`);
         if (near(sumOf(main), acc.total_kzt)) ok(true, `ответ: total_kzt (${tenge(acc.total_kzt)}) = сумме счетов и касс без депозитов`);
         else if (deps.length && near(sumOf(items), acc.total_kzt)) ok(false, `ответ: total_kzt (${tenge(acc.total_kzt)}) включает депозиты (${tenge(sumOf(deps))}) — по решению они в итог не входят; вопрос к 1С`);
         else ok(false, `ответ: total_kzt (${tenge(acc.total_kzt)}) не равен сумме счетов без депозитов (${tenge(sumOf(main))}); с депозитами — ${tenge(sumOf(items))}`);
+        if ('deposits_kzt' in acc) ok(typeof acc.deposits_kzt === 'number' && near(acc.deposits_kzt, sumOf(deps)), `ответ: deposits_kzt (${tenge(acc.deposits_kzt)}) = сумме счетов с deposit: true (${tenge(sumOf(deps))})`);
+        else note('в ответе /accounts нет поля deposits_kzt — сумму депозитов приложение сложило само');
+        ok(deps.every((i) => i.type === 'bank') && items.every((i) => kzt(i) !== 0), `ответ: депозиты — только банковские счета, нулевых остатков нет${items.some((i) => kzt(i) === 0) ? ` — с нулём: ${items.filter((i) => kzt(i) === 0).length}` : ''}`);
+        const rank = (i) => (i.deposit === true ? 2 : i.type === 'cash' ? 1 : 0);
+        ok(items.every((i, k) => k === 0 || rank(items[k - 1]) <= rank(i)), 'ответ: порядок базы — банковские счета, кассы, депозиты');
         const sumDump = dumps.find((d) => d.path === `/orgs/${org.id}/summary` && d.status === 200);
         if (sumDump && sumDump.body.money) {
           const m = sumDump.body.money;
@@ -288,12 +293,16 @@ function serve() {
         ok(mainRows.length === main.length && depRows.length === deps.length, `в листе ${mainRows.length} счетов и касс и ${depRows.length} депозитов — как в ответе (${main.length} и ${deps.length})`);
         const lost = items.filter((i) => !(i.deposit === true ? depRows : mainRows).some((r) => r.includes(flat(i.name)) && r.includes(tenge(kzt(i)))));
         ok(!lost.length, `каждый счёт показан с названием и остатком в тенге${lost.length ? ` — не найдено: ${lost.length}` : ''}`);
-        const cur = items.filter((i) => i.currency !== 'KZT');
+        const cur = items.filter((i) => i.currency && i.currency !== 'KZT');
         if (cur.length) ok(cur.every((i) => (i.deposit === true ? depRows : mainRows).some((r) => r.includes(flat(i.name)) && r.includes(` ${i.currency}`))), `валютные счета (${cur.length}): в подписи остаток в валюте счёта`);
         ok(flat(await page.locator('.sheet-wrap .acc-total').innerText()) === `Итого ${tenge(acc.total_kzt)}`, `«Итого» в листе — ${tenge(acc.total_kzt)}`);
         if (sumDump) ok(norm(await page.locator(`${screen} .hero .bm-num`).innerText()).replace(/\s/g, '') === tenge(acc.total_kzt).replace(/[\s₸]/g, ''), '«Итого» в листе и «Деньги на сегодня» на главной — одна цифра');
-        if (deps.length) ok(flat(await page.locator('.sheet-wrap .acc-dep-head').innerText()) === `Депозиты ${tenge(sumOf(deps))}`, `блок «Депозиты» под итогом, сумма ${tenge(sumOf(deps))}`);
+        const depSum = typeof acc.deposits_kzt === 'number' ? acc.deposits_kzt : sumOf(deps);
+        if (deps.length) ok(flat(await page.locator('.sheet-wrap .acc-dep-head').innerText()) === `Депозиты ${tenge(depSum)}`, `блок «Депозиты» под итогом, сумма ${tenge(depSum)}`);
         else ok((await page.locator('.sheet-wrap [data-acc="deposits"]').count()) === 0, 'депозитов в ответе нет — блока «Депозиты» нет');
+        const hm = String(acc.updated_at || '').slice(11, 16);
+        ok(/^\d\d:\d\d$/.test(hm) && flat(await page.locator('.sheet-wrap [data-acc-at]').innerText()) === `на ${hm}`, `под заголовком — «на ${hm}»: время ответа по времени компании`);
+        ok(!/null/.test(mainRows.concat(depRows).join(' ')), 'в подписях счетов нет «null»');
         const wide = await page.evaluate(() => {
           const b = document.querySelector('.sheet-wrap .sheet-body');
           return b.scrollWidth > b.clientWidth + 1;

@@ -1153,8 +1153,10 @@ actions.accounts = async () => {
   try {
     const d = await api.accounts(api.orgId());
     const deps = d.deposits || [];
+    // остатки — на момент ответа сервера; время компании, как в ответе, без пересчёта в пояс телефона
+    const at = /T\d\d:\d\d/.test(String(d.asOf || '')) ? `на ${String(d.asOf).slice(11, 16)}` : '';
     openSheet(`<div class="sheet-title">Деньги на сегодня</div>
-      <div class="sheet-sub">${H(d.orgName || '')}</div>
+      <div class="sheet-sub" data-acc-sub>${[H(d.orgName || ''), at ? `<span data-acc-at>${at}</span>` : ''].filter(Boolean).join(' · ')}</div>
       <div class="acc-list" data-acc="main">
         ${d.items.length ? d.items.map(accRow).join('') : '<div class="acc-none">Счетов и касс с остатком нет</div>'}
       </div>

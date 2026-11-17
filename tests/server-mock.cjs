@@ -1840,6 +1840,11 @@ const PUSH_STUB = () => {
       ok(JSON.stringify(await catTexts()) === JSON.stringify(['Все', 'Проектная 0', 'Регулярная 3', 'Консалтинг 0']) && JSON.stringify(await zero()) === JSON.stringify(['Проектная 0', 'Консалтинг 0']), `категории с нулём в текущем отборе остаются в ряду, приглушены (${(await catTexts()).join(' · ')})`);
       await cat('cat_c').click();
       await page.waitForSelector(`${scr} [data-prj-empty]`, { timeout: 8000 });
+      const seen = async (sel) => page.evaluate((q) => {
+        const c = document.querySelector(`.screen:not(.leaving) ${q}`).getBoundingClientRect();
+        return c.left >= 0 && c.right <= document.documentElement.clientWidth;
+      }, sel);
+      ok(await seen('[data-prj-cats] .chip.on'), 'выбранный чип за правым краем ряда после перерисовки прокручен в видимую часть');
       ok(last().query.category === 'cat_c' && (await catOn()) === 'Консалтинг 0' && JSON.stringify(await zero()) === JSON.stringify(['Проектная 0']) && (await page.locator('.toast.show').count()) === 0, 'категория с нулём выбирается: «Проектов не найдено», выбранный чип не приглушён и не сброшен');
       noErrors(errors);
       await ctx.close();

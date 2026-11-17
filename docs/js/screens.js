@@ -2555,6 +2555,16 @@ async function projectList(org, list) {
       </div>`;
   return {
     key: 'reports', tab: 'reports', depth: 1, nav: true, title: 'Проекты',
+    // Ряды чипов прокручиваются вбок, а экран после нажатия перерисовывается: выбранный чип, который стоит за правым
+    // краем (четвёртая категория, «Без ID»), возвращаем в видимую часть ряда.
+    mount(el) {
+      el.querySelectorAll('.prj-chips').forEach((row) => {
+        const on = [...row.querySelectorAll('.chip.on')].pop();
+        if (!on) return;
+        const over = on.getBoundingClientRect().right - row.getBoundingClientRect().right + 16;
+        if (over > 0) row.scrollLeft += over;
+      });
+    },
     html: `<div class="scroll">
       ${reportsHead(list, 'projects', `<button class="period-chip" data-act="prj-filters" data-prj-period aria-label="Период: ${prjPeriodLabel(d)}. Изменить">${I.calendar}${prjPeriodLabel(d)}${I.chevD}</button>`)}
       ${cats.length ? `<div class="chips prj-chips prj-cats" data-prj-cats>

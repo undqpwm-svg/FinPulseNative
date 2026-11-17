@@ -367,10 +367,11 @@ function unavailable(id) {
   if (!demoReports(org(id)).includes('projects')) throw new ApiError('report_unavailable', 'Отчёт недоступен', { contractCode: 'report_unavailable' }, 403);
 }
 
-// Категории проектов — как их отдаёт 1С с 1.16.7 (поле categories и параметр category). В демо их две: проектная
-// логистика — «Проектная», перевозки и брокеридж — «Регулярная»; у реализаций без ID категории нет.
+// Категории проектов — как их отдаёт 1С с 1.16.7 (поле categories и параметр category): весь справочник, count — без
+// учёта выбранной категории. category у проекта — наименование из того же справочника. В демо категорий две;
+// реализация без ID в категории участвует наравне с проектами, у одного проекта категории нет — он виден только под «Все».
 const PRJ_CATS = [{ id: 'cat_project', name: 'Проектная' }, { id: 'cat_regular', name: 'Регулярная' }];
-const prjCat = (p) => (p.without_id ? null : p.category === 'Проектная логистика' ? 'cat_project' : 'cat_regular');
+const prjCat = (p) => (PRJ_CATS.find((c) => c.name === p.category) || {}).id || null;
 
 export async function projects(id, f = {}) {
   await wait(250);

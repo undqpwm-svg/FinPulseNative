@@ -2532,7 +2532,7 @@ async function projectList(org, list) {
   if (f.category && !cats.some((c) => c.id === f.category)) return prjDropCategory(org, list, 'Этой категории больше нет. Показаны все проекты.');
   const items = d.items;
   const t = d.totals;
-  const catChip = (c) => `<button class="chip ${f.category === c.id ? 'on' : ''}" data-act="prj-chip" data-k="category" data-v="${H(c.id)}" data-prj-cat="${H(c.id)}">${H(c.name)}${c.count === null ? '' : ` <i class="chip-n">${c.count}</i>`}</button>`;
+  const catChip = (c) => `<button class="chip ${f.category === c.id ? 'on' : c.count === 0 ? 'zero' : ''}" data-act="prj-chip" data-k="category" data-v="${H(c.id)}" data-prj-cat="${H(c.id)}">${H(c.name)}${c.count === null ? '' : ` <i class="chip-n">${c.count}</i>`}</button>`;
   const chip = (k, v, label) => `<button class="chip ${String(f[k]) === String(v) ? 'on' : ''}" data-act="prj-chip" data-k="${k}" data-v="${v}">${label}</button>`;
   const sortLabel = (PRJ_SORTS.find((s) => s[0] === f.sort) || PRJ_SORTS[0])[2];
   let rows = '';
@@ -2575,7 +2575,8 @@ async function projectList(org, list) {
 }
 
 // Чипы над списком: статус — один из трёх; «Есть долг» и «Без ID» — переключатели, сочетаются со статусом.
-// Ряд категорий над итогами: одна категория или «Все»; повторное нажатие на выбранную возвращает «Все».
+// Ряд категорий над итогами: одна категория или «Все»; повторное нажатие на выбранную возвращает «Все». Сервер
+// отдаёт весь справочник: категория с нулём проектов в текущем отборе приглушена, но не прячется и нажимается.
 actions['prj-chip'] = (t) => {
   const k = t.dataset.k;
   if (k === 'category') {

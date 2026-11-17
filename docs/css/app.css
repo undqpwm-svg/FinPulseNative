@@ -1088,6 +1088,7 @@ button.period-chip { gap: 5px; }
 .seg + .prj-cats { margin-top: 12px; }
 .chip-n { margin-left: 2px; font-style: normal; font-weight: 600; font-size: 12.5px; opacity: 0.5; }
 .chip.on .chip-n { opacity: 0.65; }
+.chip.zero { color: var(--stone-2); }
 .prj-sum { display: flex; justify-content: space-between; align-items: center; margin: 14px 4px 10px; font-size: 13.5px; color: var(--stone); }
 .prj-sum b { color: var(--ink); }
 .prj-sum .link-btn { gap: 3px; }

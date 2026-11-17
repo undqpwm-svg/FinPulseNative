@@ -367,7 +367,7 @@ async function mockApi(page, ctl) {
       if (st.prjEmpty) items = [];
       // категории (1С с 1.16.7): st.prjCats = [{ id, name }]; не задано — база старше: поля categories нет, параметр
       // category незнаком (422 без details.fields, как отвечает посредник). st.prjCatsLax — неизвестный id не 422, а молча.
-      const catOf = (x) => (x.without_id ? null : x.category === 'Проектная логистика' ? 'cat_p' : 'cat_r');
+      const catOf = (x) => ({ Проектная: 'cat_p', Регулярная: 'cat_r' }[x.category] || null); // у проекта category — наименование категории
       const cat = q.get('category');
       if (cat && !st.prjCats) return err(422, 'validation_error', 'Неизвестный параметр: category');
       if (cat && !st.prjCats.some((c) => c.id === cat) && !st.prjCatsLax) return err(422, 'validation_error', 'Проверьте параметры запроса.', { fields: { category: 'Неизвестная категория' } });
@@ -1072,7 +1072,7 @@ const PUSH_STUB = () => {
       const pay = norm(await page.locator('[data-prj-pay]').innerText());
       ok(mar.includes('рентабельность 34%') && mar.includes('27 778 000 ₸') && mar.includes('14 307 759 ₸'), '«Маржа»: расходы 27 778 000, маржа 14 307 759, рентабельность 34%');
       ok(pay.includes('Оплата заказчика') && pay.includes('с НДС') && pay.includes('37 540 000 ₸') && pay.includes('11 279 480 ₸'), '«Оплата заказчика»: оплачено и долг из ответа');
-      ok(card.includes('Сапарова Мадина') && card.includes('Таможня и брокеридж') && card.includes('27 июля 2026'), 'реквизиты: ответственный, категория, дата заказа');
+      ok(card.includes('Сапарова Мадина') && card.includes('Регулярная') && card.includes('27 июля 2026'), 'реквизиты: ответственный, категория, дата заказа');
       ok(norm(await page.locator('[data-pt="sales"] .pt-head').innerText()).replace(/\s+/g, ' ').includes('Реализации 8 42 085 759 ₸') && norm(await page.locator('[data-pt="purchases"] .pt-head').innerText()).replace(/\s+/g, ' ').includes('Поступления по ID 3 20 030 000 ₸') && norm(await page.locator('[data-pt="payments"] .pt-head').innerText()).replace(/\s+/g, ' ').includes('Оплаты поставщикам 4 19 200 000 ₸'), 'три таблицы: число строк и суммы (расходы 27,8 млн и поступления 20,0 млн — разные числа)');
       ok((await page.locator('[data-pt="sales"] .pt-body').isHidden()) && (await page.locator('[data-pt="payments"] .pt-body').isHidden()), 'таблицы свёрнуты');
       await shot(page, '16-proekt-kartochka');
@@ -1724,7 +1724,7 @@ const PUSH_STUB = () => {
       await shot(page, '29-proekty-kategoriya');
       await statusChip('done').click();
       await settle(page, 800);
-      ok(last().query.category === 'cat_p' && last().query.status === 'done' && JSON.stringify(await catTexts()) === JSON.stringify(['Все', 'Проектная 2', 'Регулярная 1']), `категория сочетается со статусом; числа в чипах — по текущему отбору без категории (${(await catTexts()).join(' · ')})`);
+      ok(last().query.category === 'cat_p' && last().query.status === 'done' && JSON.stringify(await catTexts()) === JSON.stringify(['Все', 'Проектная 2', 'Регулярная 2']), `категория сочетается со статусом; числа в чипах — по текущему отбору без категории (${(await catTexts()).join(' · ')})`);
       await page.locator(`${scr} [data-act="prj-chip"][data-k="debtOnly"]`).click();
       await settle(page, 800);
       ok(last().query.category === 'cat_p' && last().query.status === 'done' && last().query.debt_only === 'true', 'категория сочетается с «Есть долг»');
@@ -1742,6 +1742,7 @@ const PUSH_STUB = () => {
       // категория переживает шторку (период, сортировка), «Сбросить» в шторке её снимает
       await cat('cat_r').click();
       await waitRows(5);
+      ok((await page.locator(`${scr} .prj.noid`).count()) === 1 && (await page.locator(`${scr} .prj[data-prj="prj_demo_6c3d"]`).count()) === 0, 'реализация без ID участвует в категории наравне с проектами; проекта без категории в ней нет');
       await page.locator('[data-prj-period]').click();
       await settle(page, 450);
       ok((await page.locator('.sheet [data-prj-cat], .sheet [data-k="category"]').count()) === 0, 'в шторке «Отборы и сортировка» категории нет — она выбирается чипами на экране');
@@ -1825,6 +1826,21 @@ const PUSH_STUB = () => {
       await settle(page, 1200);
       st.prj422 = false;
       ok(norm(await page.locator('.toast').innerText()).includes('Период не подошёл') && last().query.category === 'cat_r' && (await catOn()) === 'Регулярная 5' && (await rows().count()) === 5 && norm(await page.locator('[data-prj-period]').innerText()).includes('1 янв — 30 ноя 2026'), '422 по датам при выбранной категории — сброшен период, категория осталась, список по ней');
+
+      // весь справочник: категория с нулём проектов приглушена, но остаётся в ряду и нажимается; выбранная не приглушается
+      await page.waitForFunction(() => !document.querySelector('.toast.show'), null, { timeout: 6000 });
+      st.prjCats = [...BOTH, { id: 'cat_c', name: 'Консалтинг' }];
+      await page.locator('[data-prj-period]').click();
+      await settle(page, 400);
+      await page.locator('.sheet [data-act="prj-reset"]').click();
+      await settle(page, 600);
+      await statusChip('in_work').click();
+      await waitRows(4);
+      const zero = async () => (await page.locator(`${scr} [data-prj-cats] .chip.zero`).allInnerTexts()).map((x) => norm(x).replace(/\s+/g, ' ').trim());
+      ok(JSON.stringify(await catTexts()) === JSON.stringify(['Все', 'Проектная 0', 'Регулярная 3', 'Консалтинг 0']) && JSON.stringify(await zero()) === JSON.stringify(['Проектная 0', 'Консалтинг 0']), `категории с нулём в текущем отборе остаются в ряду, приглушены (${(await catTexts()).join(' · ')})`);
+      await cat('cat_c').click();
+      await page.waitForSelector(`${scr} [data-prj-empty]`, { timeout: 8000 });
+      ok(last().query.category === 'cat_c' && (await catOn()) === 'Консалтинг 0' && JSON.stringify(await zero()) === JSON.stringify(['Проектная 0']) && (await page.locator('.toast.show').count()) === 0, 'категория с нулём выбирается: «Проектов не найдено», выбранный чип не приглушён и не сброшен');
       noErrors(errors);
       await ctx.close();
     }

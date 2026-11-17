@@ -140,11 +140,32 @@ export function decide(id, status, comment = '') {
   save();
 }
 
+// «Отправить директору» (демо): пользователь согласовал свой этап, заявка ждёт директора. В календарь она не встаёт —
+// окончательного решения ещё нет.
+export function sendToDirector(id, comment = '') {
+  const o = org();
+  const r = o.requests.find((x) => x.id === id);
+  const t = nowHM();
+  state.decisions[id] = { status: 'approved', comment, d: 0, t, toDirector: true };
+  state.events.push({
+    id: `e${Date.now()}`,
+    org: o.id,
+    type: 'approved',
+    d: 0,
+    t,
+    title: 'Вы отправили заявку директору',
+    text: `${r.contractor} · ${money(r.amount)}`,
+    link: `request:${id}`,
+    read: true,
+  });
+  save();
+}
+
 // ---------- платёжный календарь ----------
 // Плановые движения + согласованные в демо заявки (встают в календарь на дату оплаты)
 export function flows(o = org()) {
   const extra = requests(o)
-    .filter((r) => r.status === 'approved' && r.mine)
+    .filter((r) => r.status === 'approved' && r.mine && !r.decision.toDirector)
     .map((r) => ({ d: r.due, type: 'out', who: r.contractor, article: r.article, note: r.purpose, amount: r.amount, req: r.id }));
   return [...o.flows, ...extra];
 }

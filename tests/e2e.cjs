@@ -237,6 +237,7 @@ async function runFlow(browser, name, opts, isPhone) {
   await settle(page);
   ok(await page.locator('.screen:not(.leaving) .req-card').count() === 3, 'в списке 3 заявки');
   ok(await page.locator('.screen:not(.leaving) .tag-warn').count() === 1, 'одна заявка с пометкой «Сверх лимита»');
+  ok(await page.locator('.screen:not(.leaving) [data-dir-tag]').count() === 1 && (await page.locator('.screen:not(.leaving) .req-wrap[data-id="r103"] [data-dir-tag]').innerText().then(norm)) === 'Доп. согласование', 'одна заявка с меткой «Доп. согласование» — та, что пришла директору');
   await noHScroll(page, 'Заявки');
   if (isPhone) await shot(page, '10-zayavki');
 
@@ -312,6 +313,9 @@ async function runFlow(browser, name, opts, isPhone) {
   await page.evaluate(() => { location.hash = '#/requests/r103'; });
   await settle(page);
   ok(await page.locator('.screen:not(.leaving) .actionbar [data-act="return"]').isVisible(), 'в карточке есть «На доработку»');
+  const dirRt = await page.locator('.screen:not(.leaving) .rt').evaluateAll((els) => els.map((e) => e.innerText.replace(/\u00A0/g, ' ').replace(/\s+/g, ' ').trim()));
+  ok(dirRt.length === 3 && dirRt[1].includes('Гульнара Бекова') && dirRt[1].includes('Согласовал и отправил директору') && dirRt[2].includes('(вы)') && dirRt[2].includes('Директор — доп. согласование'), 'заявка на доп. согласовании: кто отправил директору и строка директора');
+  ok(await page.locator('.screen:not(.leaving) [data-act="to-director"]').count() === 0, 'у директора кнопки «Отправить директору» нет');
   if (isPhone) await shot(page, '26-zayavka-tri-deystviya');
   await tap(page, '[data-act="return"]');
   await settle(page, 450);
@@ -531,6 +535,40 @@ async function runFlow(browser, name, opts, isPhone) {
   await tap(page, '[data-act="bulk-done"]');
   await settle(page, 900);
   ok(await page.locator('.screen:not(.leaving) .req-card').count() === 1 && (await tabBadge(page)) === '1' && await page.locator('.screen:not(.leaving) [data-act="bulk-start"]').count() === 0, 'демо: в списке осталась одна заявка, значок вкладки — 1');
+
+  // --- отправить директору («Дала Агро Сервис»: пользователь — последний в маршруте, директор — другой человек) ---
+  await page.evaluate(() => { location.hash = '#/profile'; });
+  await settle(page);
+  await tap(page, '[data-act="switch-org"][data-id="dala"]');
+  await settle(page, 300);
+  await page.evaluate(() => { location.hash = '#/requests/r301'; });
+  await settle(page);
+  await page.waitForFunction(() => !document.querySelector('.toast.show'), null, { timeout: 5000 });
+  ok(await page.locator('.screen:not(.leaving) .actionbar [data-act="to-director"]').isVisible(), 'демо: в карточке есть «Отправить директору»');
+  await noHScroll(page, 'Заявка, отправить директору');
+  if (isPhone) await shot(page, '41-zayavka-otpravit-direktoru');
+  await tap(page, '[data-act="to-director"]');
+  await settle(page, 450);
+  ok((await page.locator('.sheet').innerText().then(norm)).includes('Директор — Серик Байжанов'), 'демо: в подтверждении — имя директора');
+  await page.locator('.sheet #reject-text').fill('Предзаказ на весну — на ваше решение');
+  await noHScroll(page, 'Отправить директору, подтверждение');
+  if (isPhone) await shot(page, '42-otpravit-direktoru-podtverzhdenie');
+  await tap(page, '[data-act="director-confirm"]');
+  await page.waitForSelector('.toast.show', { timeout: 6000 });
+  ok((await page.locator('.toast').innerText().then(norm)).trim() === 'Отправлено директору' && (await screenKey(page)) === '#/requests/r301', 'демо: «Отправлено директору», карточка остаётся открытой');
+  await settle(page, 500);
+  const sentRt = await page.locator('.screen:not(.leaving) .rt').evaluateAll((els) => els.map((e) => e.innerText.replace(/ /g, ' ').replace(/\s+/g, ' ').trim()));
+  ok(sentRt.length === 4 && sentRt[2].includes('Согласовал и отправил директору') && sentRt[3].includes('Серик Байжанов') && sentRt[3].includes('Директор — доп. согласование'), 'демо: в маршруте — «Согласовал и отправил директору» и строка директора');
+  ok(await page.locator('.screen:not(.leaving) .actionbar').count() === 0 && (await page.locator('.screen:not(.leaving) .status-chip').innerText().then(norm)) === 'На согласовании у директора', 'демо: кнопок нет, статус «На согласовании у директора»');
+  await page.waitForFunction(() => !document.querySelector('.toast.show'), null, { timeout: 5000 });
+  await scrollTo(page, '.route');
+  if (isPhone) await shot(page, '43-otpravleno-direktoru');
+  await tap(page, '[data-back]');
+  await settle(page);
+  ok(await page.locator('.screen:not(.leaving) .req-card').count() === 0 && (await tabBadge(page)) === '0', 'демо: заявка ушла из «Ждут решения», значка на вкладке нет');
+  await page.evaluate(() => { location.hash = '#/calendar/2026-11-15'; });
+  await settle(page);
+  ok((await screenKey(page)) === '#/calendar/2026-11-15' && !(await page.locator('.screen:not(.leaving)').innerText().then(norm)).includes('Агро Запчасть'), 'демо: отправленная директору заявка в календарь на дату оплаты не встала');
   await page.evaluate(() => { location.hash = '#/profile'; });
   await settle(page);
   await tap(page, '[data-act="switch-org"][data-id="alfa"]');

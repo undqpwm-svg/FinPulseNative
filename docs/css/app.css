@@ -901,6 +901,14 @@ html.framed .loadbar { top: 50px; left: 24px; right: 24px; }
 .actionbar.ab-3 .ab-main { grid-column: 1 / -1; }
 .btn-sm { height: 46px; font-size: 15px; border-radius: 15px; }
 #app .scroll.has-actionbar.ab-3-pad { padding-bottom: calc(var(--sab) + 160px); }
+/* Доп. согласование директором (1.2.7): «Отправить директору» — вторичная, в одном ряду с «Согласовать». */
+.actionbar.ab-3.ab-dir .ab-main { grid-column: auto; }
+.actionbar.ab-3.ab-dir .btn { min-width: 0; padding: 0 4px; }
+/* на экране уже 390 px подпись переносится на вторую строку — высота кнопки та же */
+.ab-director { font-size: 14.5px; letter-spacing: -0.02em; line-height: 1.15; text-align: center; }
+.tag-dir { background: var(--lav); color: var(--ink); }
+.sheet-sub.dir-sub { margin: 14px 0 12px; text-align: center; }
+.sheet-sub.dir-sub b { color: var(--ink); font-weight: 600; }
 .btn-dark { background: var(--ink); color: var(--milk); }
 .returned .done-ring { fill: var(--lav); }
 .returned .done-mark { stroke: var(--ink); stroke-dasharray: 140; stroke-dashoffset: 140; }

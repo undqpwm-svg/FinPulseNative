@@ -1398,7 +1398,7 @@ function reqCard(r, today, leaving = false, pick = false) {
     <button class="req-card" data-go="#/requests/${H(r.id)}">
       <span class="req-top"><b class="req-who">${H(r.contractor)}</b><b class="req-sum">${money(r.amount)}</b></span>
       <span class="req-purpose">${H(r.purpose)}</span>
-      <span class="req-tags"><span class="tag">${H(r.article)}</span>${r.overLimit > 0 && r.status === 'pending' ? `<span class="tag tag-warn">${I.alert}Сверх лимита</span>` : ''}${pick && !can ? '<span class="tag req-solo">только по одной</span>' : ''}${statusTag}</span>
+      <span class="req-tags"><span class="tag">${H(r.article)}</span>${r.overLimit > 0 && r.status === 'pending' ? `<span class="tag tag-warn">${I.alert}Сверх лимита</span>` : ''}${r.directorApproval && r.status === 'pending' ? '<span class="tag tag-dir" data-dir-tag>Доп. согласование</span>' : ''}${pick && !can ? '<span class="tag req-solo">только по одной</span>' : ''}${statusTag}</span>
       <span class="req-foot">
         <span class="req-person">${personAva(r.initiator.initials, 'ava-xs')}${H(r.initiator.name)}</span>
         ${r.status === 'pending' ? `<span class="req-due ${urgent ? 'urgent' : ''}">${I.clock}${dueLabel(r, today)}</span>` : `<span class="req-due">${stampAt(r.decidedAt, today)}</span>`}
@@ -1796,9 +1796,12 @@ actions['bulk-done'] = async () => {
 };
 
 function routeStep(s, today) {
-  const label = { created: 'Заявка создана', approved: 'Согласовано', rejected: 'Отклонено', returned: 'Возвращено на доработку', pending: 'Ждёт решения', waiting: 'Ещё не дошла очередь', skipped: 'Этап пропущен' }[s.status] || s.status;
+  // Тот, кто согласовал свой этап и отправил заявку директору (контракт 6.8), — своя подпись.
+  const label = s.sentToDirector && s.status === 'approved'
+    ? 'Согласовал и отправил директору'
+    : { created: 'Заявка создана', approved: 'Согласовано', rejected: 'Отклонено', returned: 'Возвращено на доработку', pending: 'Ждёт решения', waiting: 'Ещё не дошла очередь', skipped: 'Этап пропущен' }[s.status] || s.status;
   const ic = { created: I.file, approved: I.check, rejected: I.x, returned: I.refresh, pending: I.clock, waiting: I.clock, skipped: I.chevR }[s.status] || I.clock;
-  return `<li class="rt rt-${H(s.status)}">
+  return `<li class="rt rt-${H(s.status)}"${s.director ? ' data-rt-director' : ''}${s.sentToDirector ? ' data-rt-sent' : ''}>
     <span class="rt-dot">${ic}</span>
     <div class="rt-body">
       <b>${H(s.name)}${s.me ? ' (вы)' : ''}</b>
@@ -1825,7 +1828,10 @@ function budgetUse(r) {
 async function requestDetail(id) {
   let r;
   try {
-    r = await api.request(api.orgId(), id);
+    // После «Отправить директору» карточка приходит в ответе на само действие — показываем её, без второго запроса.
+    const fresh = ui.freshCard;
+    ui.freshCard = null;
+    r = fresh && fresh.id === id && fresh.org === api.orgId() ? fresh.card : await api.request(api.orgId(), id);
   } catch (e) {
     if (e instanceof ApiError && e.code === 'not_found') {
       return {
@@ -1880,7 +1886,12 @@ async function requestDetail(id) {
     </section>`;
   }
 
-  const statusChip = r.status === 'pending'
+  // Заявка ушла директору и ждёт его решения: «Согласована» про неё говорить рано.
+  const atDirector = !r.canDecide && (r.route || []).some((s) => s.director && s.status === 'pending');
+  const sendDir = !!(r.canDecide && r.canSendToDirector);
+  const statusChip = atDirector
+    ? '<span class="status-chip st-wait" data-at-director>На согласовании у директора</span>'
+    : r.status === 'pending'
     ? `<span class="status-chip st-wait">${r.canDecide ? 'Ждёт вашего решения' : 'На согласовании'}</span>`
     : r.status === 'approved' ? '<span class="status-chip st-ok">Согласована</span>'
       : r.status === 'rejected' ? '<span class="status-chip st-neg">Отклонена</span>' : '<span class="status-chip">На доработке</span>';
@@ -1928,9 +1939,10 @@ async function requestDetail(id) {
         <ol class="route">${(r.route || []).map((s) => routeStep(s, today)).join('')}</ol>
       </section>
     </div>
-    ${r.canDecide ? `<div class="actionbar ab-3">
+    ${r.canDecide ? `<div class="actionbar ab-3 ${sendDir ? 'ab-dir' : ''}">
       <button class="btn btn-ghost btn-sm" data-act="reject">Отклонить</button>
       <button class="btn btn-ghost btn-sm" data-act="return">На доработку</button>
+      ${sendDir ? '<button class="btn btn-secondary ab-director" data-act="to-director">Отправить директору</button>' : ''}
       <button class="btn btn-primary ab-main" data-act="approve">${I.check}Согласовать</button>
     </div>` : ''}`,
   };
@@ -1991,6 +2003,41 @@ actions.approve = () => {
 };
 
 actions['approve-confirm'] = (t) => submitDecision('approve', '', t);
+
+// «Отправить директору» (контракт 6.8): последний в маршруте согласует свой этап и передаёт заявку директору из
+// настроек 1С. Кнопка есть, только если 1С прислала can_send_to_director: true. Комментарий необязателен, его увидит
+// директор. Имя директора стоит отдельной строкой: в вопросе его пришлось бы склонять.
+actions['to-director'] = () => {
+  const r = ui.request;
+  if (!r || !r.canSendToDirector) return;
+  const { over } = budgetUse(r);
+  const who = r.director && r.director.name;
+  ui.decision = null;
+  openSheet(`<div class="sheet-title">Согласовать и отправить директору?</div>
+    <div class="confirm-sum">${money(r.amount)}</div>
+    <p class="confirm-sub">${H(r.contractor)} · до ${dayMonth(D(r.due))}</p>
+    ${over ? `<div class="over-note compact">${I.alert}<div><b>Сверх лимита на ${money(over)}</b><span>Статья «${H((r.budget && r.budget.article) || r.article)}»</span></div></div>` : ''}
+    <p class="sheet-sub dir-sub" data-dir-who>${who ? `Директор — <b>${H(who)}</b>. ` : ''}Вы согласуете свой этап, окончательное решение останется за${NB}директором.</p>
+    <textarea class="textarea" id="reject-text" rows="2" maxlength="1000" placeholder="Комментарий директору, если нужен"></textarea>
+    <div class="field-err" id="reject-err" hidden>${I.alert}<span>Комментарий слишком длинный — не больше 1000 символов</span></div>
+    <div class="sheet-actions">
+      <button class="btn btn-primary btn-block" data-act="director-confirm" data-label="Отправить директору">Отправить директору</button>
+      <button class="btn btn-text btn-block" data-act="sheet-close">Отмена</button>
+    </div>`, {
+    onMount(wrap) {
+      const ta = wrap.querySelector('#reject-text');
+      ta.addEventListener('input', () => {
+        wrap.querySelector('#reject-err').hidden = true;
+        ta.classList.remove('invalid');
+      });
+    },
+  });
+};
+
+actions['director-confirm'] = (t) => {
+  const ta = document.getElementById('reject-text');
+  submitDecision('director', ta ? ta.value.trim() : '', t);
+};
 
 const REASONS = ['Нет денег в бюджете', 'Перенесём на следующий месяц', 'Нужен другой поставщик', 'Уточните сумму'];
 
@@ -2125,12 +2172,18 @@ async function submitDecision(kind, comment, btn) {
       if ((e.details || {}).contractCode === 'idempotency_key_reused') ui.decision.key = approveKey(orgNow, r.id); // «Повторить» — уже с новым
       else ui.decision = null;
     }
+    // «Отправить директору»: ключ — на одно нажатие. Обрыв связи, 503 и 504 его сохраняют («Повторить» идёт с тем же),
+    // окончательный отказ (409, 422) снимает — следующее нажатие уйдёт с новым.
+    if (kind === 'director' && !isSessionEnd(e) && !keepsKey(e)) {
+      if ((e.details || {}).contractCode === 'idempotency_key_reused') ui.decision.key = uuid();
+      else ui.decision = null;
+    }
     if (isSessionEnd(e)) {
       await closeSheet(true);
       onUnauthorized(e);
       return;
     }
-    showDecisionError(e, r);
+    showDecisionError(e, r, kind);
     return;
   }
   ui.busy = false;
@@ -2138,6 +2191,15 @@ async function submitDecision(kind, comment, btn) {
   if (kind === 'approve') approveSettled(orgNow, r.id);
   invalidate();
   await closeSheet();
+  if (kind === 'director') {
+    // Заявка не утверждена: остаёмся в карточке и показываем её такой, какой она пришла в ответе, — этап пользователя
+    // согласован, появилась строка директора, кнопок решения больше нет.
+    ui.freshCard = res && res.card ? { id: r.id, org: orgNow, card: res.card } : null;
+    if (nav.badge > 0) nav.badge -= 1; // из «Ждут решения» она ушла
+    setTimeout(() => toast('Отправлено директору'), 60);
+    nav.rerender();
+    return;
+  }
   const amount = money(r.amount);
   if (kind === 'approve') {
     const final = !res || !res.requestStatus || res.requestStatus === 'approved';
@@ -2172,19 +2234,32 @@ function setSheetIdle() {
   }
 }
 
-function showDecisionError(e, r) {
+// Текст сервера приходит без точки на конце, а за ним идёт наша фраза.
+const sentence = (t) => (/[.!?…]$/.test(String(t).trim()) ? String(t).trim() : `${String(t).trim()}.`);
+
+function showDecisionError(e, r, kind) {
   const c = e instanceof ApiError ? e.code : 'server_error';
-  if (c === 'comment_required') {
+  const dir = kind === 'director';
+  // Комментарий: пустой при отклонении и возврате; длиннее 1000 символов — у «Отправить директору» (там он необязателен).
+  if (c === 'comment_required' || (c === 'validation_error' && dir && document.getElementById('reject-text'))) {
     setSheetIdle();
     const err = document.getElementById('reject-err');
     if (err) err.hidden = false;
+    if (dir) document.getElementById('reject-text').classList.add('invalid');
     return;
   }
   let icon = I.alert;
   let title;
   let text;
   let buttons;
-  if (c === 'already_decided') {
+  if (dir && (c === 'already_decided' || (e.details || {}).contractCode === 'not_awaiting_you' || c === 'action_failed')) {
+    // 6.8: текст причины — как прислал сервер (решение уже принято, заявка не на вашем этапе, директор не задан,
+    // отправить может только последний этап, заявка уже у директора); дальше карточка перечитывается.
+    if (c !== 'action_failed') icon = I.info;
+    title = c === 'action_failed' ? 'Отправить директору не получилось' : c === 'already_decided' ? 'Решение уже принято' : 'Заявка не на вашем этапе';
+    text = `${H(sentence(e.message || (c === 'action_failed' ? 'Причина не указана' : 'Этап маршрута уже сменился')))} Директору заявка не отправлена.`;
+    buttons = '<button class="btn btn-primary btn-block" data-act="decision-refresh">Обновить заявку</button>';
+  } else if (c === 'already_decided') {
     const det = e.details || {};
     const what = det.status === 'rejected' ? 'отклонена' : det.status === 'returned' ? 'возвращена на доработку' : 'согласована';
     icon = I.info;
@@ -2215,7 +2290,7 @@ function showDecisionError(e, r) {
   }
   ui.busy = false;
   setSheet(`<div class="decision-state" data-state="${H(c)}" role="alert">
-      <span class="ds-ic ${c === 'already_decided' ? 'info' : ''}">${icon}</span>
+      <span class="ds-ic ${icon === I.info ? 'info' : ''}">${icon}</span>
       <div class="sheet-title">${title}</div>
       <p class="sheet-sub">${text}</p>
     </div>

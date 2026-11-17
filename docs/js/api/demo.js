@@ -230,12 +230,15 @@ export async function calendar(id) {
 }
 
 // ---------- заявки ----------
+const DIRECTOR_ROLE = 'Директор — доп. согласование'; // строка директора в маршруте (контракт 6.2, kind "director")
+
 function reqDto(r) {
   return {
     id: r.id, num: r.num, contractor: r.contractor, amount: r.amount, currency: 'KZT', article: r.article, purpose: r.purpose,
     initiator: { name: r.initiator.name, initials: r.initiator.initials, role: r.initiator.role },
     due: isoAt(r.due), overLimit: S.overLimit(r), status: r.status,
     decidedAt: r.decision ? stampIso(r.decision.d, r.decision.t) : null,
+    directorApproval: !!r.directorApproval && r.status === 'pending',
   };
 }
 
@@ -252,11 +255,12 @@ export async function request_(id, reqId) {
   let impact = null;
   if (r.due >= 0 && r.due < S.horizon() && r.status !== 'rejected') {
     const day = S.days(o)[r.due];
-    const inCalendar = r.mine && r.status === 'approved';
+    const inCalendar = r.mine && r.status === 'approved' && !r.decision.toDirector;
     const before = inCalendar ? day.end + r.amount : day.end;
     impact = { date: iso(day.date), before, after: before - r.amount, inCalendar };
   }
   const u = userDto();
+  const toDirector = !!(r.mine && r.decision.toDirector);
   const route = r.route.map((s) => {
     let status = s.status;
     let at = s.at ? stampIso(s.at.d, s.at.t) : null;
@@ -268,8 +272,16 @@ export async function request_(id, reqId) {
     } else if (s.me && r.status !== 'pending' && r.decision) {
       comment = r.decision.comment || '';
     }
-    return { name: s.me ? u.name : s.name, role: s.role, me: !!s.me, status, at, comment };
+    return {
+      name: s.me ? u.name : s.name, role: s.director ? DIRECTOR_ROLE : s.role, me: !!s.me, status, at, comment,
+      director: !!s.director, sentToDirector: !!s.sentToDirector || (toDirector && !!s.me),
+    };
   });
+  // Отправлена директору в демо: у пользователя «Согласовал и отправил директору», следом — строка директора.
+  if (toDirector && r.sendToDirector) {
+    route.push({ name: r.sendToDirector.name, role: DIRECTOR_ROLE, me: false, status: 'pending', at: null, comment: '', director: true, sentToDirector: false });
+  }
+  const canSend = r.status === 'pending' && !!r.sendToDirector;
   return {
     today: iso(S.today()),
     ...reqDto(r),
@@ -283,6 +295,8 @@ export async function request_(id, reqId) {
     attachments: [{ id: 'invoice', name: r.attachment.file, size: r.attachment.size, kind: 'invoice' }],
     route,
     canDecide: r.status === 'pending',
+    canSendToDirector: canSend,
+    director: canSend ? { name: r.sendToDirector.name, initials: r.sendToDirector.initials || '' } : null,
   };
 }
 
@@ -314,6 +328,15 @@ export async function decide(id, reqId, { decision, comment, idempotencyKey }) {
     }, 409);
   }
   S.setOrg(id);
+  // «Отправить директору» (6.8): этап пользователя согласован, заявка остаётся на согласовании — у директора.
+  if (decision === 'director') {
+    if (!r.sendToDirector) throw new ApiError('action_failed', 'Директор для дополнительного согласования не задан в настройках', {}, 422);
+    if (String(comment || '').length > 1000) throw new ApiError('validation_error', 'Комментарий — не длиннее 1000 символов', {}, 422);
+    S.sendToDirector(r.id, comment || '');
+    const sent = { decision: 'approved', requestStatus: 'in_approval', paymentDate: null, nextApprover: r.sendToDirector.name, card: await request_(id, reqId) };
+    applied.set(idempotencyKey, sent);
+    return sent;
+  }
   const status = { approve: 'approved', reject: 'rejected', return: 'returned' }[decision];
   S.decide(r.id, status, comment || '');
   const res = {

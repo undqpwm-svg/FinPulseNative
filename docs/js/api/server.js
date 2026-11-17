@@ -451,6 +451,8 @@ function reqDto(r) {
     overLimit: r.over_limit || 0,
     status: screenStatus(r),
     decidedAt: r.my_decision_at || null,
+    // Заявка ждёт этого пользователя на доп. согласовании директора (6.1, с 1С 1.16.8). Старые базы поля не отдают.
+    directorApproval: r.director_approval === true,
   };
 }
 
@@ -485,13 +487,22 @@ function routeStep(s) {
   else if (s.state === 'skipped') status = 'skipped';
   else status = { approved: 'approved', rejected: 'rejected', returned: 'returned', sent: 'created' }[s.decision] || 'pending';
   const who = (s.approver && s.approver.name) || '';
+  // Доп. согласование директором (6.2, 6.8): строка директора — kind "director"; строка того, кто ему отправил, —
+  // sent_to_director. Незнакомый kind остаётся обычным этапом.
+  const director = s.kind === 'director';
+  let role;
+  if (s.kind === 'created') role = 'Инициатор';
+  else if (director) role = 'Директор — доп. согласование';
+  else role = [s.approver && s.approver.is_group ? 'группа согласующих' : null, `этап ${s.stage}`].filter(Boolean).join(' · ');
   return {
     name: s.on_behalf_of ? `${who} (за ${s.on_behalf_of})` : who,
-    role: s.kind === 'created' ? 'Инициатор' : [s.approver && s.approver.is_group ? 'группа согласующих' : null, `этап ${s.stage}`].filter(Boolean).join(' · '),
+    role,
     me: !!s.is_me,
     status,
     at: s.at || null,
     comment: s.comment || '',
+    director,
+    sentToDirector: s.sent_to_director === true,
   };
 }
 
@@ -519,6 +530,9 @@ function cardDto(r) {
     attachments: (r.files || []).map((f) => ({ id: f.id, name: f.name, size: sizeText(f.size), kind: 'pdf', contentType: f.content_type })),
     route: (r.route || []).map(routeStep),
     canDecide: r.my_action === 'required',
+    // Кнопка «Отправить директору» (6.8): только по явному true из 1С. База до 1.16.8 поля не отдаёт — кнопки нет.
+    canSendToDirector: r.can_send_to_director === true,
+    director: r.director && r.director.name ? { name: String(r.director.name), initials: r.director.initials || '' } : null,
   };
 }
 
@@ -545,8 +559,9 @@ export async function attachment(id, reqId, fileId) {
   return { kind: 'pdf', url: URL.createObjectURL(f.blob), name: f.name };
 }
 
-// Решение (6.4–6.7): approve / reject / return. Ответ — обновлённая карточка.
-const ACTION_PATH = { approve: 'approve', reject: 'reject', return: 'return' };
+// Решение (6.4–6.8): approve / reject / return / director (согласовать свой этап и отправить директору).
+// Ответ — обновлённая карточка.
+const ACTION_PATH = { approve: 'approve', reject: 'reject', return: 'return', director: 'to-director' };
 
 export async function decide(id, reqId, { decision, comment, idempotencyKey }) {
   const action = ACTION_PATH[decision];
@@ -565,9 +580,10 @@ export async function decide(id, reqId, { decision, comment, idempotencyKey }) {
     throw e;
   }
   const card = await res.json();
-  const next = (card.route || []).find((s) => s.kind === 'approval' && (s.state === 'current' || s.state === 'waiting'));
+  const next = (card.route || []).find((s) => (s.kind === 'approval' || s.kind === 'director') && (s.state === 'current' || s.state === 'waiting'));
   return {
-    decision: { approve: 'approved', reject: 'rejected', return: 'returned' }[decision],
+    decision: { approve: 'approved', reject: 'rejected', return: 'returned', director: 'approved' }[decision],
+    card: card && card.id ? cardDto(card) : null, // карточка из ответа: экран показывает её без повторного запроса
     requestStatus: card.status === 'on_approval' ? 'in_approval' : card.status,
     paymentDate: card.status === 'approved' ? card.pay_by : null,
     nextApprover: next && next.approver ? next.approver.name : null,

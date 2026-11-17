@@ -325,6 +325,57 @@ async function mockApi(page, ctl) {
       if (how === 'abort') return route.abort('failed');
       return done({});
     }
+    // ---- доп. согласование директором (6.8, 1С 1.16.8): st.dir = { viewer: 'approver' | 'director', plan: [исходы] } ----
+    // approver — пользователь последний в маршруте и может отправить заявку директору; director — он сам директор и
+    // получил заявку на доп. согласование. Исходы POST …/to-director: ok, long (422 validation_error), failed (422),
+    // stage (409 not_awaiting_you), decided (409), 503, 504-applied (применено, ответ потерян), abort (обрыв связи).
+    if (st.dir && (p === '/orgs/org_test/requests' || p === '/orgs/org_test/requests/req_1' || p === '/orgs/org_test/requests/req_1/to-director')) {
+      const Dd = st.dir;
+      Dd.applied = Dd.applied || new Set();
+      Dd.log = Dd.log || [];
+      const base = card();
+      const created = base.route[0];
+      const stage = (over) => ({ ...base.route[1], sent_to_director: false, ...over });
+      const dirRow = (over) => ({ stage: 2, kind: 'director', approver: { name: 'Нурлан Абенов', initials: 'НА', position: null, is_group: false }, is_me: false, state: 'current', decision: null, sent_to_director: false, at: null, comment: null, on_behalf_of: null, due_at: null, ...over });
+      let c;
+      if (Dd.viewer === 'director') {
+        c = card({ can_send_to_director: false, director: null, route: [created, stage({ approver: { name: 'Айгуль Сеитова', initials: 'АС', position: null, is_group: false }, is_me: false, state: 'done', decision: 'approved', sent_to_director: true, at: T(TODAY, '10:05'), comment: 'Сумма большая — на усмотрение директора' }), dirRow({ is_me: true })] });
+      } else if (Dd.sent) {
+        c = card({ my_action: 'approved', my_decision_at: T(TODAY, '10:20'), can_send_to_director: false, director: null, route: [created, stage({ state: 'done', decision: 'approved', sent_to_director: true, at: T(TODAY, '10:20'), comment: Dd.comment || null }), dirRow({})] });
+      } else {
+        c = card({ can_send_to_director: true, director: { name: 'Нурлан Абенов', initials: 'НА' }, route: [created, stage({})] });
+      }
+      if (p === '/orgs/org_test/requests') {
+        const decidedTab = url.searchParams.get('tab') === 'decided';
+        const mine = Dd.viewer === 'director' ? !decidedTab : decidedTab === !!Dd.sent;
+        return json(200, { updated_at: T(TODAY, '10:15'), items: mine ? [{ ...listItem(c), director_approval: Dd.viewer === 'director' }] : [], next_cursor: null });
+      }
+      if (p === '/orgs/org_test/requests/req_1') return json(200, c);
+      const key = call.headers['idempotency-key'];
+      const how = (Dd.plan || []).shift() || 'ok';
+      Dd.log.push({ key, body, how });
+      const done = (replay) => {
+        if (!Dd.sent) Dd.comment = (body && body.comment) || null;
+        Dd.sent = true;
+        Dd.applied.add(key);
+        const after = card({ my_action: 'approved', my_decision_at: T(TODAY, '10:20'), can_send_to_director: false, director: null, route: [created, stage({ state: 'done', decision: 'approved', sent_to_director: true, at: T(TODAY, '10:20'), comment: Dd.comment }), dirRow({})] });
+        return json(200, after, replay ? { 'Idempotent-Replayed': 'true' } : {});
+      };
+      if (Dd.applied.has(key)) return done(true); // повтор с тем же ключом: второй отправки нет
+      if (how === 'long') return err(422, 'validation_error', 'Проверьте поля запроса.', { fields: { comment: 'Не длиннее 1000 символов' } });
+      if (how === 'failed') return err(422, 'action_failed', 'Директор для дополнительного согласования не задан в настройках');
+      if (how === 'stage') return err(409, 'not_awaiting_you', 'Заявка сейчас не на вашем этапе');
+      if (how === 'decided') return err(409, 'already_decided', 'Заявку уже согласовал Самат Ахметов 11.11.2026 в 10:12', { decided_by: 'Самат Ахметов', decided_at: T(TODAY, '10:12'), decision: 'approved' });
+      if (how === '503') return err(503, 'source_unavailable', 'Нет связи с учётом компании', undefined, { 'Retry-After': '30' });
+      if (how === '504-applied') {
+        Dd.comment = (body && body.comment) || null;
+        Dd.sent = true;
+        Dd.applied.add(key);
+        return err(504, 'source_timeout', 'Учёт не успел ответить');
+      }
+      if (how === 'abort') return route.abort('failed');
+      return done(false);
+    }
     if (p === '/orgs/org_test/requests') {
       const c = card();
       if (url.searchParams.get('tab') === 'decided') return json(200, { updated_at: T(TODAY, '10:15'), items: st.decided ? [listItem(card({ my_action: 'approved', my_decision_at: T(TODAY, '10:20') }))] : [], next_cursor: null });
@@ -2128,6 +2179,196 @@ const PUSH_STUB = () => {
       const rj = ctl.calls.find((c) => c.path.endsWith('/reject'));
       ok(rj && rj.body.comment === 'Нужен другой поставщик' && rj.headers['idempotency-key'], 'POST …/reject с комментарием и Idempotency-Key');
       ok(norm(await page.locator('.done-title').innerText()) === 'Заявка отклонена', '«Заявка отклонена»');
+      noErrors(errors);
+      await ctx.close();
+    }
+
+    // ---------- 4а. отправить директору ----------
+    console.log('\n▶ «Отправить директору»: доп. согласование директором (контракт, 6.8)');
+    {
+      const { ctx, page, errors, ctl } = await newCtx();
+      await page.goto(BASE);
+      await settle(page, 800);
+      await login(page, ctl);
+      const scr = '.screen:not(.leaving)';
+      const open = async () => {
+        await page.evaluate(() => { location.hash = '#/requests/req_1'; });
+        await settle(page, 800);
+      };
+      const cardReads = () => ctl.calls.filter((c) => c.method === 'GET' && c.path === '/orgs/org_test/requests/req_1').length;
+      const sends = () => ctl.calls.filter((c) => c.path.endsWith('/to-director'));
+      const noToast = () => page.waitForFunction(() => !document.querySelector('.toast.show'), null, { timeout: 6000 });
+      // старая база: полей нет — нет ни кнопки, ни метки, «Согласовать» во всю ширину
+      await page.evaluate(() => { location.hash = '#/requests'; });
+      await settle(page, 800);
+      ok(await page.locator(`${scr} .req-card`).count() === 1 && await page.locator(`${scr} [data-dir-tag]`).count() === 0, 'база без полей 1.16.8: в списке метки «Доп. согласование» нет');
+      await open();
+      ok(await page.locator(`${scr} [data-act="approve"]`).isVisible() && await page.locator(`${scr} [data-act="to-director"]`).count() === 0 && await page.locator(`${scr} .actionbar.ab-dir`).count() === 0, 'база без полей 1.16.8: кнопки «Отправить директору» нет');
+      const wide = await page.evaluate(() => {
+        const b = document.querySelector('.screen:not(.leaving) .actionbar .ab-main').getBoundingClientRect();
+        const bar = document.querySelector('.screen:not(.leaving) .actionbar').getBoundingClientRect();
+        return b.width > bar.width * 0.8;
+      });
+      ok(wide, 'без кнопки директора «Согласовать» занимает всю ширину, как раньше');
+      // can_send_to_director: false — кнопки тоже нет
+      ctl.override = (call, { json }) => (call.method === 'GET' && call.path === '/orgs/org_test/requests/req_1' ? (json(200, card({ can_send_to_director: false, director: null })), true) : false);
+      await page.evaluate(() => { location.hash = '#/requests'; });
+      await settle(page, 600);
+      await open();
+      ok(await page.locator(`${scr} [data-act="to-director"]`).count() === 0, 'can_send_to_director: false — кнопки нет');
+      ctl.override = null;
+
+      // последний этап маршрута: кнопка рядом с «Согласовать»
+      ctl.state.dir = { viewer: 'approver', plan: [] };
+      await page.evaluate(() => { location.hash = '#/requests'; });
+      await settle(page, 700);
+      ok(await page.locator(`${scr} [data-dir-tag]`).count() === 0, 'у отправляющего метки «Доп. согласование» в списке нет (director_approval: false)');
+      await open();
+      const bar = await page.evaluate(() => {
+        const q = (s) => document.querySelector(`.screen:not(.leaving) .actionbar ${s}`);
+        const rect = (e) => { const r = e.getBoundingClientRect(); return { top: Math.round(r.top), left: Math.round(r.left), right: Math.round(r.right), w: Math.round(r.width) }; };
+        const d = q('[data-act="to-director"]');
+        const range = document.createRange();
+        range.selectNodeContents(d);
+        return { dir: rect(d), ok: rect(q('[data-act="approve"]')), rej: rect(q('[data-act="reject"]')), text: d.textContent.trim(), fits: d.scrollWidth <= d.clientWidth + 1 && range.getClientRects().length === 1, secondary: d.classList.contains('btn-secondary'), vw: window.innerWidth };
+      });
+      ok(bar.text === 'Отправить директору' && bar.secondary, 'can_send_to_director: true — вторичная кнопка «Отправить директору»');
+      ok(bar.dir.top === bar.ok.top && bar.dir.right <= bar.ok.left && bar.rej.top < bar.dir.top, 'кнопка стоит в одном ряду с «Согласовать», слева от неё; «Отклонить» и «На доработку» — рядом выше');
+      ok(bar.fits && bar.ok.right <= bar.vw, 'подпись кнопки помещается в одну строку (390 px), ряд не выходит за экран');
+      await shot(page, '30-zayavka-otpravit-direktoru');
+      await page.locator(`${scr} [data-act="to-director"]`).click();
+      await settle(page, 450);
+      const sh = norm(await page.locator('.sheet').innerText());
+      ok(sh.includes('Согласовать и отправить директору?') && sh.includes('Директор — Нурлан Абенов') && sh.includes('1 500 000 ₸'), 'подтверждение: вопрос, сумма и имя директора из director.name');
+      ok((await page.locator('.sheet #reject-text').getAttribute('maxlength')) === '1000' && (await page.locator('.sheet #reject-text').getAttribute('placeholder')) === 'Комментарий директору, если нужен', 'комментарий необязателен, не длиннее 1000 символов');
+      await shot(page, '31-otpravit-direktoru-podtverzhdenie');
+      const send = () => page.locator('.sheet [data-act="director-confirm"]').click();
+      const reopen = async () => {
+        await page.locator(`${scr} [data-act="to-director"]`).click();
+        await settle(page, 450);
+      };
+
+      // 422 validation_error — длинный комментарий: шторка остаётся, ошибка у поля
+      ctl.state.dir.plan = ['long'];
+      await send();
+      await settle(page, 700);
+      ok(await page.locator('.sheet #reject-err').isVisible() && norm(await page.locator('.sheet #reject-err').innerText()).includes('не больше 1000 символов') && await page.locator('.sheet [data-act="director-confirm"]').isEnabled(), '422 validation_error — «Комментарий слишком длинный», шторка остаётся');
+      ok(JSON.stringify(sends()[0].body) === '{}' && sends()[0].method === 'POST' && sends()[0].path === '/orgs/org_test/requests/req_1/to-director', 'без комментария уходит POST …/to-director с телом {}');
+
+      // 422 action_failed — message как есть, карточка перечитывается
+      ctl.state.dir.plan = ['failed'];
+      await send();
+      await settle(page, 700);
+      const af = norm(await page.locator('.decision-state').innerText());
+      ok(af.includes('Отправить директору не получилось') && af.includes('Директор для дополнительного согласования не задан в настройках. Директору заявка не отправлена.'), '422 action_failed — текст message из учёта');
+      await shot(page, '32-otpravit-direktoru-otkaz');
+      let reads = cardReads();
+      await page.locator('.sheet [data-act="decision-refresh"]').click();
+      await settle(page, 900);
+      ok(cardReads() === reads + 1 && await page.locator('.sheet-wrap').count() === 0, '«Обновить заявку» перечитывает карточку');
+
+      // 409 not_awaiting_you и 409 already_decided — message, карточка перечитывается
+      ctl.state.dir.plan = ['stage'];
+      await reopen();
+      await send();
+      await settle(page, 700);
+      ok(norm(await page.locator('.decision-state').innerText()).includes('Заявка сейчас не на вашем этапе. Директору заявка не отправлена.'), '409 not_awaiting_you — message сервера');
+      reads = cardReads();
+      await page.locator('.sheet [data-act="decision-refresh"]').click();
+      await settle(page, 900);
+      ok(cardReads() === reads + 1, 'после 409 not_awaiting_you карточка перечитана');
+      ctl.state.dir.plan = ['decided'];
+      await reopen();
+      await send();
+      await settle(page, 700);
+      const ad = norm(await page.locator('.decision-state').innerText());
+      ok(ad.includes('Решение уже принято') && ad.includes('Заявку уже согласовал Самат Ахметов 11.11.2026 в 10:12. Директору заявка не отправлена.'), '409 already_decided — message сервера');
+      reads = cardReads();
+      await page.locator('.sheet [data-act="decision-refresh"]').click();
+      await settle(page, 900);
+      ok(cardReads() === reads + 1, 'после 409 already_decided карточка перечитана');
+      const k4 = sends().map((c) => c.headers['idempotency-key']);
+      ok(k4.length === 4 && k4.every(Boolean) && new Set(k4).size === 4, 'каждое нажатие — новый Idempotency-Key');
+
+      // 503 → «Повторить» → обрыв связи → «Повторить» → 200: ключ один; карточка — из ответа, без второго запроса
+      ctl.state.dir.plan = ['503', 'abort', 'ok'];
+      await reopen();
+      await page.locator('.sheet #reject-text').fill('  Сумма большая — на усмотрение директора  ');
+      await send();
+      await settle(page, 700);
+      ok(norm(await page.locator('.decision-state').innerText()).includes('1С сейчас недоступна'), '503 — «1С сейчас недоступна», «Повторить»');
+      await page.locator('.sheet [data-act="decision-retry"]').click();
+      await settle(page, 700);
+      ok(norm(await page.locator('.decision-state').innerText()).includes('Нет связи'), 'обрыв связи — «Нет связи», «Повторить»');
+      reads = cardReads();
+      await page.locator('.sheet [data-act="decision-retry"]').click();
+      await page.waitForSelector('.toast.show', { timeout: 6000 });
+      ok(norm(await page.locator('.toast').innerText()).trim() === 'Отправлено директору', 'после 200 — короткое «Отправлено директору»');
+      await settle(page, 500);
+      const last3 = sends().slice(-3);
+      ok(last3.every((c) => c.headers['idempotency-key'] === last3[0].headers['idempotency-key']) && !k4.includes(last3[0].headers['idempotency-key']), 'повторы после 503 и обрыва — с тем же Idempotency-Key');
+      ok(last3.every((c) => c.body && c.body.comment === 'Сумма большая — на усмотрение директора') && last3.every((c) => c.headers['x-app-version'] === APP_VERSION), 'комментарий уходит в теле {"comment"} без пробелов по краям');
+      ok((await page.evaluate(() => location.hash)) === '#/requests/req_1' && cardReads() === reads, 'остаёмся в карточке; она показана из ответа, без повторного GET');
+      ok(await page.locator(`${scr} .actionbar`).count() === 0 && await page.locator('.done-overlay').count() === 0, 'кнопок решения больше нет, «Заявка согласована» не показывается');
+      ok(norm(await page.locator(`${scr} .status-chip`).innerText()) === 'На согласовании у директора', 'статус карточки — «На согласовании у директора»');
+      const rt = await page.locator(`${scr} .rt`).evaluateAll((els) => els.map((e) => e.innerText.replace(/ /g, ' ').replace(/\s+/g, ' ').trim()));
+      ok(rt.length === 3 && rt[1].includes('(вы)') && rt[1].includes('Согласовал и отправил директору') && rt[1].includes('«Сумма большая — на усмотрение директора»'), 'маршрут: строка с sent_to_director — «Согласовал и отправил директору»');
+      ok(rt[2].includes('Нурлан Абенов') && rt[2].includes('Директор — доп. согласование') && rt[2].includes('Ждёт решения'), 'маршрут: строка kind "director" — «Директор — доп. согласование», ждёт решения');
+      await noToast();
+      await page.locator(`${scr} .route`).scrollIntoViewIfNeeded();
+      await settle(page, 300);
+      await shot(page, '33-otpravleno-direktoru');
+      await page.locator(`${scr} [data-back]`).click();
+      await settle(page, 900);
+      ok((await page.evaluate(() => location.hash)) === '#/requests' && await page.locator(`${scr} .req-card`).count() === 0, 'заявка ушла из «Ждут решения»');
+      await page.locator(`${scr} [data-act="req-tab"][data-v="done"]`).click();
+      await settle(page, 700);
+      ok(await page.locator(`${scr} .req-card`).count() === 1 && norm(await page.locator(`${scr} .req-card`).innerText()).includes('Согласована'), 'в «Решённых» она с my_action: approved');
+      noErrors(errors);
+      await ctx.close();
+    }
+    {
+      // 504 после того, как учёт принял отправку: «Повторить» с тем же ключом → 200 Idempotent-Replayed
+      const { ctx, page, errors, ctl } = await newCtx(devices['iPhone 13'], { dir: { viewer: 'approver', plan: ['504-applied'] } });
+      await page.goto(BASE);
+      await settle(page, 800);
+      await login(page, ctl);
+      await page.evaluate(() => { location.hash = '#/requests/req_1'; });
+      await settle(page, 800);
+      await page.locator('.screen:not(.leaving) [data-act="to-director"]').click();
+      await settle(page, 450);
+      await page.locator('.sheet [data-act="director-confirm"]').click();
+      await settle(page, 800);
+      ok(norm(await page.locator('.decision-state').innerText()).includes('Сервер не ответил'), '504 source_timeout — «Сервер не ответил», «Повторить»');
+      await page.locator('.sheet [data-act="decision-retry"]').click();
+      await page.waitForSelector('.toast.show', { timeout: 6000 });
+      const log = ctl.state.dir.log;
+      ok(log.length === 2 && log[0].key === log[1].key && norm(await page.locator('.toast').innerText()).trim() === 'Отправлено директору', 'повтор после 504 — с тем же ключом; ответ Idempotent-Replayed принят как успех');
+      ok(await page.locator('.screen:not(.leaving) [data-rt-director]').count() === 1 && await page.locator('.screen:not(.leaving) .actionbar').count() === 0, 'в маршруте одна строка директора, кнопок нет');
+      noErrors(errors);
+      await ctx.close();
+    }
+    {
+      // директор: заявка пришла на доп. согласование — метка в списке, обычные три решения, кнопки «Отправить директору» нет
+      const { ctx, page, errors, ctl } = await newCtx(devices['iPhone 13'], { dir: { viewer: 'director' } });
+      await page.goto(BASE);
+      await settle(page, 800);
+      await login(page, ctl);
+      const scr = '.screen:not(.leaving)';
+      await page.evaluate(() => { location.hash = '#/requests'; });
+      await settle(page, 800);
+      ok(await page.locator(`${scr} [data-dir-tag]`).count() === 1 && norm(await page.locator(`${scr} [data-dir-tag]`).innerText()) === 'Доп. согласование', 'director_approval: true — метка «Доп. согласование» в списке');
+      await shot(page, '34-zayavki-dop-soglasovanie');
+      await page.locator(`${scr} .req-card`).click();
+      await settle(page, 800);
+      ok(await page.locator(`${scr} [data-act="to-director"]`).count() === 0 && await page.locator(`${scr} [data-act="approve"]`).isVisible() && await page.locator(`${scr} [data-act="reject"]`).isVisible() && await page.locator(`${scr} [data-act="return"]`).isVisible(), 'у директора — обычные три решения, «Отправить директору» нет');
+      ok(norm(await page.locator(`${scr} .status-chip`).innerText()) === 'Ждёт вашего решения', 'статус у директора — «Ждёт вашего решения»');
+      const rt = await page.locator(`${scr} .rt`).evaluateAll((els) => els.map((e) => e.innerText.replace(/ /g, ' ').replace(/\s+/g, ' ').trim()));
+      ok(rt.length === 3 && rt[1].includes('Айгуль Сеитова') && rt[1].includes('Согласовал и отправил директору') && rt[1].includes('«Сумма большая — на усмотрение директора»'), 'директор видит, кто отправил, и комментарий');
+      ok(rt[2].includes('(вы)') && rt[2].includes('Директор — доп. согласование') && rt[2].includes('Ждёт вашего решения'), 'его строка — «Директор — доп. согласование», ждёт его решения');
+      await page.locator(`${scr} .route`).scrollIntoViewIfNeeded();
+      await settle(page, 300);
+      await shot(page, '35-direktor-dop-soglasovanie');
       noErrors(errors);
       await ctx.close();
     }

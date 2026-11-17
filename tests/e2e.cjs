@@ -369,6 +369,19 @@ async function runFlow(browser, name, opts, isPhone) {
   ok(await page.locator('.screen:not(.leaving) .prj').count() === 8 && await page.locator('.screen:not(.leaving) .prj').last().evaluate((e) => e.classList.contains('noid')), 'проекты: 8 строк, реализация без ID — последней');
   await noHScroll(page, 'Проекты');
   if (isPhone) await shot(page, '32-proekty-spisok');
+  {
+    // отбор по категории: ряд чипов над итогами
+    const cats = (await page.locator('.screen:not(.leaving) [data-prj-cats] .chip').allInnerTexts()).map((x) => norm(x).replace(/\s+/g, ' ').trim());
+    ok(cats.join(' · ') === 'Все · Проектная 2 · Регулярная 5', `проекты: чипы категорий с числом проектов (${cats.join(' · ')})`);
+    await tap(page, '[data-prj-cat="cat_project"]');
+    await page.waitForFunction(() => document.querySelectorAll('.screen:not(.leaving) .prj').length === 2, null, { timeout: 6000 });
+    ok((await page.locator('.screen:not(.leaving) [data-prj-totals]').innerText().then(norm)).includes('2 проекта'), 'проекты: «Проектная» — 2 проекта, итоги по категории');
+    await noHScroll(page, 'Проекты, категория');
+    if (isPhone) await shot(page, '40-proekty-kategoriya');
+    await tap(page, '[data-prj-cat=""]');
+    await page.waitForFunction(() => document.querySelectorAll('.screen:not(.leaving) .prj').length === 8, null, { timeout: 6000 });
+    ok((await page.locator('.screen:not(.leaving) [data-prj-period] svg').count()) === 2, 'проекты: на кнопке периода — значок календаря');
+  }
   await tap(page, '[data-act="prj-chip"][data-k="debtOnly"]');
   await page.waitForFunction(() => document.querySelectorAll('.screen:not(.leaving) .prj').length === 7, null, { timeout: 6000 });
   ok((await page.locator('.screen:not(.leaving) [data-prj-totals]').innerText().then(norm)).includes('7 проектов'), 'проекты: «Есть долг» — 7 проектов, итоги по отбору');

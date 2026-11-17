@@ -2424,9 +2424,10 @@ views.reports = async (params) => {
 // ПРОЕКТЫ (отчёт 7.4) И ОТЧЁТ ПО ПРОЕКТУ (7.5)
 // ======================================================================
 // Отборы, сортировку и итоги считает сервер: экран передаёт параметры и показывает ответ. Поиска нет.
-const PRJ_DEFAULT = { period: 'ytd', from: '', to: '', status: '', debtOnly: false, withoutId: false, sort: 'date' };
+// category — id категории проектов из ответа сервера (поле categories, с ФинПульса 1.16.7); '' — все.
+const PRJ_DEFAULT = { period: 'ytd', from: '', to: '', status: '', category: '', debtOnly: false, withoutId: false, sort: 'date' };
 const PRJ_PAGE = 50;
-const PRJ_PERIODS = [['month', 'Этот месяц'], ['prev', 'Прошлый месяц'], ['quarter', 'Квартал'], ['ytd', 'С начала года'], ['custom', 'Свой…']];
+const PRJ_PERIODS = [['month', 'Этот месяц'], ['prev', 'Прошлый месяц'], ['quarter', 'Квартал'], ['ytd', 'С начала года'], ['custom', 'Выбрать даты']];
 const PRJ_SORTS = [['date', 'Дата заказа — сначала новые', 'По дате заказа'], ['debt', 'Долг — сначала большие', 'По долгу'],
   ['margin', 'Маржа — сначала большая', 'По марже'], ['revenue', 'Стоимость — сначала большие', 'По стоимости']];
 const PROJECT_FORMS = ['проект', 'проекта', 'проектов'];
@@ -2444,9 +2445,9 @@ function prjRange(f) {
   if (f.period === 'custom') return { from: f.from, to: f.to };
   return {};
 }
-const prjQuery = (f, cursor) => ({ ...prjRange(f), status: f.status || null, debtOnly: f.debtOnly, withoutId: f.withoutId, sort: f.sort, limit: PRJ_PAGE, cursor });
-const prjKey = (org, f) => JSON.stringify([org, prjRange(f), f.status, f.debtOnly, f.withoutId, f.sort]);
-const prjFiltered = (f) => !!(f.status || f.debtOnly || f.withoutId || f.period !== 'ytd');
+const prjQuery = (f, cursor) => ({ ...prjRange(f), status: f.status || null, category: f.category || null, debtOnly: f.debtOnly, withoutId: f.withoutId, sort: f.sort, limit: PRJ_PAGE, cursor });
+const prjKey = (org, f) => JSON.stringify([org, prjRange(f), f.status, f.category, f.debtOnly, f.withoutId, f.sort]);
+const prjFiltered = (f) => !!(f.status || f.category || f.debtOnly || f.withoutId || f.period !== 'ytd');
 
 const pctText = (n) => `${n < 0 ? '−' : ''}${String(Math.round(Math.abs(n) * 10) / 10).replace('.', ',')}%`;
 const dmy = (s) => `${dayMonth(D(s))} ${String(s).slice(0, 4)}`;
@@ -2494,7 +2495,17 @@ function prjTotals(t, inWork) {
   </div>`;
 }
 
+// Категория сброшена на «Все»: её больше нет в списке сервера или сервер её не принял (422). Список перечитывается.
+function prjDropCategory(org, list, text) {
+  ui.prj = { ...ui.prj, category: '' };
+  prjData = null;
+  setTimeout(() => toast(text, 'info'), 60);
+  return projectList(org, list);
+}
+
 async function projectList(org, list) {
+  // id категорий у каждой базы свои: при смене организации выбор молча сбрасывается
+  if (ui.prj.category && ui.prjCatOrg !== org) ui.prj = { ...ui.prj, category: '' };
   const f = ui.prj;
   const key = prjKey(org, f);
   if (!prjData || prjData.key !== key || Date.now() - prjData.at > 60e3) {
@@ -2502,6 +2513,10 @@ async function projectList(org, list) {
     try {
       dto = await api.projects(org, prjQuery(f));
     } catch (e) {
+      // 422 с выбранной категорией, если сервер не назвал виноватыми даты: категорию не приняли (удалена в 1С,
+      // параметр незнаком серверу) — показываем все проекты
+      const bad = e instanceof ApiError && e.code === 'validation_error' ? Object.keys((e.details && e.details.fields) || {}) : null;
+      if (bad && f.category && !bad.includes('from') && !bad.includes('to')) return prjDropCategory(org, list, 'Категория недоступна. Показаны все проекты.');
       // 422: период не приняли (длиннее трёх лет, даты перепутаны) — возвращаем отбор по умолчанию и говорим почему
       if (e instanceof ApiError && e.code === 'validation_error' && f.period !== 'ytd') {
         ui.prj = { ...f, period: 'ytd', from: '', to: '' };
@@ -2513,8 +2528,11 @@ async function projectList(org, list) {
     prjData = { key, at: Date.now(), dto };
   }
   const d = prjData.dto;
+  const cats = d.categories || [];
+  if (f.category && !cats.some((c) => c.id === f.category)) return prjDropCategory(org, list, 'Этой категории больше нет. Показаны все проекты.');
   const items = d.items;
   const t = d.totals;
+  const catChip = (c) => `<button class="chip ${f.category === c.id ? 'on' : ''}" data-act="prj-chip" data-k="category" data-v="${H(c.id)}" data-prj-cat="${H(c.id)}">${H(c.name)}${c.count === null ? '' : ` <i class="chip-n">${c.count}</i>`}</button>`;
   const chip = (k, v, label) => `<button class="chip ${String(f[k]) === String(v) ? 'on' : ''}" data-act="prj-chip" data-k="${k}" data-v="${v}">${label}</button>`;
   const sortLabel = (PRJ_SORTS.find((s) => s[0] === f.sort) || PRJ_SORTS[0])[2];
   let rows = '';
@@ -2538,7 +2556,10 @@ async function projectList(org, list) {
   return {
     key: 'reports', tab: 'reports', depth: 1, nav: true, title: 'Проекты',
     html: `<div class="scroll">
-      ${reportsHead(list, 'projects', `<button class="period-chip" data-act="prj-filters" data-prj-period>${prjPeriodLabel(d)}${I.chevD}</button>`)}
+      ${reportsHead(list, 'projects', `<button class="period-chip" data-act="prj-filters" data-prj-period aria-label="Период: ${prjPeriodLabel(d)}. Изменить">${I.calendar}${prjPeriodLabel(d)}${I.chevD}</button>`)}
+      ${cats.length ? `<div class="chips prj-chips prj-cats" data-prj-cats>
+        <button class="chip ${f.category ? '' : 'on'}" data-act="prj-chip" data-k="category" data-v="" data-prj-cat="">Все</button>${cats.map(catChip).join('')}
+      </div>` : ''}
       ${prjTotals(t)}
       <div class="chips prj-chips">
         ${chip('status', '', 'Все')}${chip('status', 'in_work', 'В работе')}${chip('status', 'done', 'Выполнен')}
@@ -2554,9 +2575,13 @@ async function projectList(org, list) {
 }
 
 // Чипы над списком: статус — один из трёх; «Есть долг» и «Без ID» — переключатели, сочетаются со статусом.
+// Ряд категорий над итогами: одна категория или «Все»; повторное нажатие на выбранную возвращает «Все».
 actions['prj-chip'] = (t) => {
   const k = t.dataset.k;
-  ui.prj = { ...ui.prj, [k]: k === 'status' ? t.dataset.v : !ui.prj[k] };
+  if (k === 'category') {
+    ui.prjCatOrg = api.orgId();
+    ui.prj = { ...ui.prj, category: ui.prj.category === t.dataset.v ? '' : t.dataset.v };
+  } else ui.prj = { ...ui.prj, [k]: k === 'status' ? t.dataset.v : !ui.prj[k] };
   nav.rerender();
 };
 

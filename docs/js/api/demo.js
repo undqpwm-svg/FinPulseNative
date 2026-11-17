@@ -367,11 +367,18 @@ function unavailable(id) {
   if (!demoReports(org(id)).includes('projects')) throw new ApiError('report_unavailable', 'Отчёт недоступен', { contractCode: 'report_unavailable' }, 403);
 }
 
+// Категории проектов — как их отдаёт 1С с 1.16.7 (поле categories и параметр category). В демо их две: проектная
+// логистика — «Проектная», перевозки и брокеридж — «Регулярная»; у реализаций без ID категории нет.
+const PRJ_CATS = [{ id: 'cat_project', name: 'Проектная' }, { id: 'cat_regular', name: 'Регулярная' }];
+const prjCat = (p) => (p.without_id ? null : p.category === 'Проектная логистика' ? 'cat_project' : 'cat_regular');
+
 export async function projects(id, f = {}) {
   await wait(250);
   unavailable(id);
   const d = (await prjData()).list;
-  let items = d.items.filter((p) => (!f.status || p.status === f.status) && (!f.debtOnly || p.debt > 0) && (!f.withoutId || p.without_id));
+  const base = d.items.filter((p) => (!f.status || p.status === f.status) && (!f.debtOnly || p.debt > 0) && (!f.withoutId || p.without_id));
+  const categories = PRJ_CATS.map((c) => ({ ...c, count: base.filter((p) => prjCat(p) === c.id).length })); // без учёта категории
+  let items = base.filter((p) => !f.category || prjCat(p) === f.category);
   const by = { debt: (p) => p.debt, margin: (p) => p.margin, revenue: (p) => p.revenue }[f.sort];
   items = [...items].sort((a, b) => Number(a.without_id) - Number(b.without_id) // без ID — последними при любой сортировке
     || (by ? by(b) - by(a) : (a.order_date < b.order_date ? 1 : a.order_date > b.order_date ? -1 : 0)));
@@ -385,6 +392,7 @@ export async function projects(id, f = {}) {
       count: items.length, withoutId: items.filter((p) => p.without_id).length, revenue, costs, margin: revenue - costs,
       marginPct: revenue ? Math.round(((revenue - costs) / revenue) * 1000) / 10 : 0, paid: sum(items, (p) => p.paid), debt: sum(items, (p) => p.debt),
     },
+    categories,
     items: items.slice(start, start + limit).map(prjDto),
     nextCursor: start + limit < items.length ? String(start + limit) : null,
   };

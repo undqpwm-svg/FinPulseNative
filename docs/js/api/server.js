@@ -625,7 +625,7 @@ const projectDto = (p) => ({
 
 export async function projects(id, f = {}) {
   const r = await getJSON(orgPath(id, `/reports/projects?${qs({
-    from: f.from, to: f.to, status: f.status,
+    from: f.from, to: f.to, status: f.status, category: f.category || null,
     debt_only: f.debtOnly ? 'true' : null, without_id: f.withoutId ? 'true' : null,
     sort: f.sort && f.sort !== 'date' ? f.sort : null, limit: f.limit || 50, cursor: f.cursor,
   })}`));
@@ -640,6 +640,10 @@ export async function projects(id, f = {}) {
       revenue: Number(t.revenue) || 0, costs: Number(t.costs) || 0, margin: Number(t.margin) || 0, marginPct: Number(t.margin_pct) || 0,
       paid: Number(t.paid) || 0, debt: Number(t.debt) || 0,
     },
+    // Категории проектов базы (с ФинПульса 1.16.7): [{ id, name, count }]. Поля нет — база старше: null, отбора нет.
+    categories: Array.isArray(r.categories)
+      ? r.categories.filter((c) => c && c.id != null && c.id !== '' && c.name).map((c) => ({ id: String(c.id), name: String(c.name), count: typeof c.count === 'number' ? c.count : null }))
+      : null,
     items: (r.items || []).map(projectDto),
     nextCursor: r.next_cursor || null,
   };

@@ -365,8 +365,16 @@ async function mockApi(page, ctl) {
         ? Array.from({ length: st.prjMany }, (_, i) => ({ ...PRJ.list.items[i % 4], id: `project_many_${i}`, project_id: `PS-2026-${1000 + i}`, status: 'in_work' }))
         : PRJ.list.items;
       if (st.prjEmpty) items = [];
-      const filtered = !!(q.get('status') || q.get('debt_only') || q.get('without_id') || st.prjMany || st.prjEmpty);
+      // категории (1С с 1.16.7): st.prjCats = [{ id, name }]; не задано — база старше: поля categories нет, параметр
+      // category незнаком (422 без details.fields, как отвечает посредник). st.prjCatsLax — неизвестный id не 422, а молча.
+      const catOf = (x) => (x.without_id ? null : x.category === 'Проектная логистика' ? 'cat_p' : 'cat_r');
+      const cat = q.get('category');
+      if (cat && !st.prjCats) return err(422, 'validation_error', 'Неизвестный параметр: category');
+      if (cat && !st.prjCats.some((c) => c.id === cat) && !st.prjCatsLax) return err(422, 'validation_error', 'Проверьте параметры запроса.', { fields: { category: 'Неизвестная категория' } });
+      const filtered = !!(q.get('status') || q.get('debt_only') || q.get('without_id') || cat || st.prjMany || st.prjEmpty);
       items = items.filter((x) => (!q.get('status') || x.status === q.get('status')) && (q.get('debt_only') !== 'true' || x.debt > 0) && (q.get('without_id') !== 'true' || x.without_id));
+      const categories = st.prjCats ? st.prjCats.map((c) => ({ ...c, count: items.filter((x) => catOf(x) === c.id).length })) : undefined;
+      if (cat) items = items.filter((x) => catOf(x) === cat);
       const by = { debt: (x) => x.debt, margin: (x) => x.margin, revenue: (x) => x.revenue }[q.get('sort')];
       items = [...items].sort((a, b) => Number(a.without_id) - Number(b.without_id) || (by ? by(b) - by(a) : (a.order_date < b.order_date ? 1 : a.order_date > b.order_date ? -1 : 0)));
       const sumOf = (f) => items.reduce((t, x) => t + f(x), 0);
@@ -377,7 +385,7 @@ async function mockApi(page, ctl) {
         : PRJ.list.totals;
       const limit = Number(q.get('limit')) || 50;
       const start = Number(q.get('cursor')) || 0;
-      return json(200, { ...PRJ.list, from: q.get('from') || PRJ.list.from, to: q.get('to') || PRJ.list.to, totals, items: items.slice(start, start + limit), next_cursor: start + limit < items.length ? String(start + limit) : null });
+      return json(200, { ...PRJ.list, from: q.get('from') || PRJ.list.from, to: q.get('to') || PRJ.list.to, totals, ...(categories ? { categories } : {}), items: items.slice(start, start + limit), next_cursor: start + limit < items.length ? String(start + limit) : null });
     }
     return err(404, 'not_found', 'Не найдено');
   });
@@ -974,6 +982,8 @@ const PUSH_STUB = () => {
       ok(norm(await page.locator('.prj[data-prj="prj_demo_9f6a"]').innerText()).includes('Оплачен полностью'), 'проект без долга — «Оплачен полностью»');
       ok(norm(await page.locator('.screen:not(.leaving) .prj-note').innerText()).includes('Стоимость, расходы и маржа — без НДС; оплачено и долг — с НДС') && norm(await page.locator('.screen:not(.leaving) .prj-stamp').innerText()).includes('Данные 1С на 15 ноября, 10:20'), 'подписи про НДС и время данных — из ответа');
       ok(norm(await page.locator('[data-prj-period]').innerText()).includes('1 янв — 30 ноя 2026'), 'плашка периода — из from/to ответа');
+      ok((await page.locator('.screen:not(.leaving) [data-prj-cats]').count()) === 0, 'в ответе нет categories (база до 1.16.7) — ряда категорий нет');
+      ok((await page.locator('[data-prj-period] svg').count()) === 2 && norm(await page.locator('[data-prj-period]').getAttribute('aria-label')).startsWith('Период: 1 янв — 30 ноя 2026'), 'кнопка периода — со значком календаря и подписью «Период: …» для экранного диктора');
       await shot(page, '14-proekty-spisok');
 
       // отборы чипами — параметрами запроса, итоги и строки из нового ответа
@@ -998,6 +1008,7 @@ const PUSH_STUB = () => {
       await page.locator('[data-prj-period]').click();
       await settle(page, 450);
       ok(norm(await page.locator('.sheet').innerText()).includes('Период — по дате реализаций') && (await page.locator('.sheet input[type="search"], .sheet [data-search]').count()) === 0, 'шторка «Отборы и сортировка»: «Период — по дате реализаций», поиска нет');
+      ok(norm(await page.locator('.sheet [data-act="prj-draft"][data-k="period"][data-v="custom"]').innerText()) === 'Выбрать даты' && !norm(await page.locator('.sheet').innerText()).includes('Свой'), 'произвольный период в шторке называется «Выбрать даты»');
       await shot(page, '15-proekty-otbory');
       await page.locator('.sheet [data-act="prj-draft"][data-k="sort"][data-v="debt"]').click();
       await page.locator('.sheet [data-act="prj-draft"][data-k="period"][data-v="prev"]').click();
@@ -1666,6 +1677,154 @@ const PUSH_STUB = () => {
       await page.locator(`${scr} .err-state [data-act="retry"]`).click();
       await settle(page, 900);
       ok(await page.locator(`${scr} .wk-table`).isVisible(), '«Обновить» → календарь открылся');
+      noErrors(errors);
+      await ctx.close();
+    }
+
+    // ---------- 1е-2. проекты: отбор по категории ----------
+    console.log('\n▶ «Проекты»: отбор по категории (поле categories, параметр category)');
+    {
+      const { ctx, page, errors, ctl } = await newCtx(devices['iPhone 13'], { orgs: [{ ...ORG, reports: ['projects', 'debtors'] }] });
+      const st = ctl.state;
+      const scr = '.screen:not(.leaving)';
+      const BOTH = [{ id: 'cat_p', name: 'Проектная' }, { id: 'cat_r', name: 'Регулярная' }];
+      st.prjCats = BOTH;
+      const prjCalls = () => ctl.calls.filter((c) => c.method === 'GET' && c.path === '/orgs/org_test/reports/projects');
+      const last = () => prjCalls().slice(-1)[0];
+      const rows = () => page.locator(`${scr} .prj`);
+      const catTexts = async () => (await page.locator(`${scr} [data-prj-cats] .chip`).allInnerTexts()).map((x) => norm(x).replace(/\s+/g, ' ').trim());
+      const catOn = async () => norm(await page.locator(`${scr} [data-prj-cats] .chip.on`).innerText()).replace(/\s+/g, ' ').trim();
+      const cat = (id) => page.locator(`${scr} [data-prj-cat="${id}"]`);
+      const statusChip = (v) => page.locator(`${scr} .chips:not([data-prj-cats]) [data-act="prj-chip"][data-k="status"][data-v="${v}"]`);
+      const waitRows = (k) => page.waitForFunction((n) => document.querySelectorAll('.screen:not(.leaving) .prj').length === n, k, { timeout: 8000 });
+      await page.goto(BASE);
+      await settle(page, 800);
+      await login(page, ctl);
+      await page.locator('.tabbar .tab[data-go="#/reports"]').click();
+      await page.waitForSelector(`${scr} [data-prj-totals]`, { timeout: 8000 });
+      await settle(page, 500);
+      ok(JSON.stringify(await catTexts()) === JSON.stringify(['Все', 'Проектная 2', 'Регулярная 5']) && (await catOn()) === 'Все', `ряд категорий из ответа: «Все» и категории с числом проектов (${(await catTexts()).join(' · ')})`);
+      ok(JSON.stringify(last().query) === JSON.stringify({ limit: '50' }), 'первый запрос — без category');
+      const order = await page.evaluate(() => {
+        const y = (q) => document.querySelector(`.screen:not(.leaving) ${q}`).getBoundingClientRect();
+        const cats = y('[data-prj-cats]');
+        const st2 = y('.chips:not([data-prj-cats])');
+        return cats.bottom <= y('[data-prj-totals]').top && y('[data-prj-totals]').bottom <= st2.top && y('.seg').bottom <= cats.top;
+      });
+      ok(order, 'ряд категорий — под переключателем отчётов и над итогами; ряд статусов — под итогами');
+      const fits = await page.evaluate(() => {
+        const r = document.querySelector('.screen:not(.leaving) [data-prj-cats]');
+        return r.scrollWidth <= r.clientWidth + 1 && document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1;
+      });
+      ok(fits, 'три чипа категорий помещаются в ширину экрана, горизонтальной прокрутки страницы нет');
+
+      await cat('cat_p').click();
+      await waitRows(2);
+      ok(last().query.category === 'cat_p' && !last().query.status && (await catOn()) === 'Проектная 2' && norm(await page.locator('[data-prj-totals]').innerText()).includes('2 проекта'), 'чип «Проектная» → category=cat_p; строки и итоги — по категории');
+      await shot(page, '29-proekty-kategoriya');
+      await statusChip('done').click();
+      await settle(page, 800);
+      ok(last().query.category === 'cat_p' && last().query.status === 'done' && JSON.stringify(await catTexts()) === JSON.stringify(['Все', 'Проектная 2', 'Регулярная 1']), `категория сочетается со статусом; числа в чипах — по текущему отбору без категории (${(await catTexts()).join(' · ')})`);
+      await page.locator(`${scr} [data-act="prj-chip"][data-k="debtOnly"]`).click();
+      await settle(page, 800);
+      ok(last().query.category === 'cat_p' && last().query.status === 'done' && last().query.debt_only === 'true', 'категория сочетается с «Есть долг»');
+      await page.locator(`${scr} [data-act="prj-chip"][data-k="debtOnly"]`).click();
+      await settle(page, 700);
+      await statusChip('').click();
+      await settle(page, 700);
+      await page.locator(`${scr} [data-act="prj-chip"][data-k="withoutId"]`).click();
+      await page.waitForSelector(`${scr} [data-prj-empty]`, { timeout: 8000 });
+      ok(last().query.category === 'cat_p' && last().query.without_id === 'true' && norm(await page.locator('[data-prj-empty]').innerText()).includes('Проектов не найдено'), 'категория сочетается с «Без ID»; пусто — «Проектов не найдено»');
+      await page.locator('[data-prj-empty] [data-act="prj-reset"]').click();
+      await waitRows(8);
+      ok(JSON.stringify(last().query) === JSON.stringify({ limit: '50' }) && (await catOn()) === 'Все', '«Сбросить отборы» снимает и категорию');
+
+      // категория переживает шторку (период, сортировка), «Сбросить» в шторке её снимает
+      await cat('cat_r').click();
+      await waitRows(5);
+      await page.locator('[data-prj-period]').click();
+      await settle(page, 450);
+      ok((await page.locator('.sheet [data-prj-cat], .sheet [data-k="category"]').count()) === 0, 'в шторке «Отборы и сортировка» категории нет — она выбирается чипами на экране');
+      await page.locator('.sheet [data-act="prj-draft"][data-k="sort"][data-v="revenue"]').click();
+      await page.locator('.sheet [data-act="prj-apply"]').click();
+      await settle(page, 900);
+      ok(last().query.category === 'cat_r' && last().query.sort === 'revenue' && (await catOn()) === 'Регулярная 5', 'после «Показать» в шторке категория остаётся выбранной');
+      await cat('cat_r').click();
+      await waitRows(8);
+      ok(!last().query.category && (await catOn()) === 'Все', 'повторное нажатие на выбранную категорию возвращает «Все»');
+      await page.locator('[data-prj-period]').click();
+      await settle(page, 450);
+      await page.locator('.sheet [data-act="prj-reset"]').click();
+      await settle(page, 900);
+
+      // выбранную категорию удалили в 1С: сервер отвечает 422 по category — сброс на «Все» с сообщением
+      await cat('cat_r').click();
+      await waitRows(5);
+      st.prjCats = [BOTH[0]];
+      let mark = prjCalls().length;
+      await statusChip('in_work').click();
+      await page.waitForFunction(() => document.querySelector('.toast.show'), null, { timeout: 8000 });
+      await settle(page, 600);
+      let after = prjCalls().slice(mark);
+      ok(after.length === 2 && after[0].query.category === 'cat_r' && !after[1].query.category && after[1].query.status === 'in_work', '422 по category → повтор запроса без категории, остальные отборы сохранены');
+      ok(norm(await page.locator('.toast').innerText()).includes('Категория недоступна. Показаны все проекты.') && (await catOn()) === 'Все' && JSON.stringify(await catTexts()) === JSON.stringify(['Все', 'Проектная 0']), `сообщение «Категория недоступна…», выбрано «Все», ряд — по новому списку (${(await catTexts()).join(' · ')})`);
+      ok((await page.locator(`${scr} .err-state`).count()) === 0 && (await rows().count()) === 4, 'экрана ошибки нет, список показан');
+      await page.waitForFunction(() => !document.querySelector('.toast.show'), null, { timeout: 6000 });
+
+      // сервер принял запрос (200), но выбранной категории в списке уже нет
+      st.prjCats = BOTH;
+      await statusChip('').click();
+      await waitRows(8);
+      await cat('cat_r').click();
+      await waitRows(5);
+      st.prjCats = [BOTH[0]];
+      st.prjCatsLax = true;
+      mark = prjCalls().length;
+      await statusChip('done').click();
+      await page.waitForFunction(() => document.querySelector('.toast.show'), null, { timeout: 8000 });
+      await settle(page, 600);
+      after = prjCalls().slice(mark);
+      ok(after.length === 2 && !after[1].query.category && norm(await page.locator('.toast').innerText()).includes('Этой категории больше нет. Показаны все проекты.') && (await catOn()) === 'Все', 'категории нет в списке ответа → «Этой категории больше нет…», запрос повторён без неё');
+      st.prjCatsLax = false;
+      await page.waitForFunction(() => !document.querySelector('.toast.show'), null, { timeout: 6000 });
+
+      // база откатилась на версию без категорий: 422 «Неизвестный параметр» без details.fields — сброс, ряд исчезает
+      st.prjCats = BOTH;
+      await statusChip('').click();
+      await waitRows(8);
+      await cat('cat_p').click();
+      await waitRows(2);
+      st.prjCats = undefined;
+      mark = prjCalls().length;
+      await statusChip('done').click();
+      await page.waitForFunction(() => document.querySelector('.toast.show'), null, { timeout: 8000 });
+      await settle(page, 600);
+      after = prjCalls().slice(mark);
+      ok(after.length === 2 && after[0].query.category === 'cat_p' && !after[1].query.category && (await page.locator(`${scr} [data-prj-cats]`).count()) === 0 && (await rows().count()) === 4, '422 «Неизвестный параметр» → категория сброшена, ряда категорий нет, список показан');
+      mark = prjCalls().length;
+      await statusChip('').click();
+      await waitRows(8);
+      ok(prjCalls().slice(mark).every((c) => !('category' in c.query)), 'дальше параметр category не уходит');
+
+      // 422 на период при выбранной категории: виноваты даты — категория остаётся
+      st.prjCats = BOTH;
+      await statusChip('in_work').click();
+      await waitRows(4);
+      await statusChip('').click();
+      await waitRows(8);
+      await cat('cat_r').click();
+      await waitRows(5);
+      await page.waitForFunction(() => !document.querySelector('.toast.show'), null, { timeout: 6000 });
+      st.prj422 = true;
+      await page.locator('[data-prj-period]').click();
+      await settle(page, 400);
+      await page.locator('.sheet [data-act="prj-draft"][data-k="period"][data-v="custom"]').click();
+      await page.locator('.sheet [data-prj-from]').fill('2026-07-01');
+      await page.locator('.sheet [data-prj-to]').fill('2026-09-30');
+      await page.locator('.sheet [data-act="prj-apply"]').click();
+      await settle(page, 1200);
+      st.prj422 = false;
+      ok(norm(await page.locator('.toast').innerText()).includes('Период не подошёл') && last().query.category === 'cat_r' && (await catOn()) === 'Регулярная 5' && (await rows().count()) === 5 && norm(await page.locator('[data-prj-period]').innerText()).includes('1 янв — 30 ноя 2026'), '422 по датам при выбранной категории — сброшен период, категория осталась, список по ней');
       noErrors(errors);
       await ctx.close();
     }

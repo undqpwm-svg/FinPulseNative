@@ -613,6 +613,37 @@ function serve() {
           await page.locator(`${screen} ${q.startsWith('status') ? '[data-act="prj-chip"][data-k="status"][data-v=""]' : sel}`).click();
           await settle(1200);
         }
+        // категории (1С с 1.16.7): ряд чипов — из поля categories; отбор — для категорий, по которым снят ответ
+        const cats = first.body.categories;
+        await page.evaluate(() => (location.hash = '#/reports/projects'));
+        await settle(400);
+        const flat = (t) => norm(t).replace(/\s+/g, ' ').trim();
+        const catChips = (await page.locator(`${screen} [data-prj-cats] .chip`).allInnerTexts()).map(flat);
+        if (!Array.isArray(cats)) {
+          note('в ответе списка проектов нет поля categories (база до 1.16.7) — ряда категорий на экране нет');
+          ok(catChips.length === 0, 'проекты: без categories ряд категорий не показан');
+        } else {
+          const want = ['Все', ...cats.map((c) => flat(`${c.name}${typeof c.count === 'number' ? ` ${c.count}` : ''}`))];
+          ok(JSON.stringify(catChips) === JSON.stringify(cats.length ? want : []), `проекты: чипы категорий — как в ответе (${cats.length} шт.: ${catChips.join(' · ') || 'ряда нет'})`);
+          ok(cats.every((c) => c && c.id != null && c.id !== '' && c.name && typeof c.count === 'number'), 'ответ: у каждой категории есть id, name и count');
+          for (const c of cats) {
+            const q = `limit=50&category=${c.id}`;
+            if (!has(LIST, q)) {
+              note(`категория «${c.name}» не проверялась: ответ с category=${c.id} не снят`);
+              continue;
+            }
+            const d = dumps.find((x) => x.key === keyOf(LIST, new URLSearchParams(q)));
+            const chip = page.locator(`${screen} [data-prj-cats] .chip`).nth(cats.indexOf(c) + 1);
+            await chip.click();
+            await settle(1500);
+            const s = await capture(`proekty-kategoriya-${cats.indexOf(c) + 1}`, `проекты, категория «${c.name}»`);
+            const cnt = await page.locator(`${screen} .prj`).count();
+            ok(!s.errCode && cnt === (d.body.items || []).length, `проекты, категория «${c.name}»: строк ${cnt}, в ответе ${(d.body.items || []).length}`);
+            if (d.body.totals && typeof c.count === 'number') ok(d.body.totals.count === c.count, `ответ: count категории «${c.name}» (${c.count}) = totals.count ответа с этой категорией (${d.body.totals.count})`);
+            await page.locator(`${screen} [data-prj-cats] .chip`).first().click();
+            await settle(1200);
+          }
+        }
       }
 
       // ---------- карточки ----------

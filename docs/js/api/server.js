@@ -794,6 +794,7 @@ const N_TYPE = { payment_corrected: 'payment', payment_cancelled: 'payment', dec
 function linkStr(l) {
   if (!l) return null;
   if (l.kind === 'request' && l.request_id) return `request:${l.request_id}`;
+  if (l.kind === 'requests') return 'requests'; // пачка новых заявок — список «Ждут решения»
   // Запрос контрагента (13.22): карточка; без идентификатора — список.
   if (l.kind === 'counterparty_request') return l.counterparty_request_id || l.request_id ? `cr:${l.counterparty_request_id || l.request_id}` : 'cr';
   if (l.kind === 'calendar' && l.date) return `calendar:${l.date}`;
@@ -814,7 +815,7 @@ export async function notifications(id) {
       title: n.title,
       text: n.text,
       read: !!n.read,
-      link: linkStr(n.link) || (n.type === 'counterparty_request' ? 'cr' : null),
+      link: linkStr(n.link) || (n.type === 'counterparty_request' ? 'cr' : n.type === 'request_batch' ? 'requests' : null),
     })),
   };
 }

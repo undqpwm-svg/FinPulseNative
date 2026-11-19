@@ -1468,7 +1468,7 @@ const PUSH_STUB = () => {
       await go.click();
       await settle(page, 500);
       let sh = await sheetText(page);
-      ok(sh.includes('Согласовать 5 заявок?') && sh.includes('2 000 000 ₸') && (await page.locator('.sheet-wrap .bk-row').count()) === 5 && sh.includes('№ 912 · ТОО «Поставщик 2»') && sh.includes('600 000 ₸') && sh.includes('Согласовать 5') && sh.includes('Отмена'), 'подтверждение: список из пяти заявок — номер, контрагент, сумма — и общая сумма');
+      ok(sh.includes('Согласовать 5 заявок на 2 000 000 ₸?') && (await page.locator('.sheet-wrap .bk-row').count()) === 5 && sh.includes('№ 912 · ТОО «Поставщик 2»') && sh.includes('600 000 ₸') && sh.includes('Согласовать 5') && sh.includes('Отмена'), 'подтверждение: список из пяти заявок — номер, контрагент, сумма — и общая сумма');
       await shot(page, '24-zayavki-podtverzhdenie');
       await page.locator('.sheet-wrap .btn[data-act="sheet-close"]').click();
       await settle(page, 500);
@@ -1710,7 +1710,7 @@ const PUSH_STUB = () => {
       await page.locator(`${scrB} [data-bulk-go]`).click();
       await settle(page, 400);
       const sh = await sheetText(page);
-      ok(sh.includes('Согласовать 3 заявки?') && sh.includes('Сверх лимита: 1 из 3') && sh.includes('Превышение — 200 000 ₸'), 'в подтверждении — «Сверх лимита: 1 из 3», превышение 200 000 ₸');
+      ok(/Согласовать 3 заявки на [\d ]+ ₸\?/.test(sh) && sh.includes('Сверх лимита: 1 из 3') && sh.includes('Превышение — 200 000 ₸'), 'в подтверждении — «Сверх лимита: 1 из 3», превышение 200 000 ₸');
       noErrors(errors);
       await ctx.close();
     }
@@ -2814,6 +2814,43 @@ const PUSH_STUB = () => {
     }
 
     // ---------- 6. push ----------
+    console.log('\n▶ Push пачки заявок (request_batch, 1.3.1): список «Ждут решения» нужной организации');
+    {
+      const { ctx, page, errors, ctl } = await newCtx(devices['iPhone 13'], { orgs: [ORG2, ORG] });
+      await page.goto(`${BASE}#/requests?org=org_test&n=n_b1`);
+      await settle(page, 900);
+      ok((await page.evaluate(() => location.hash)) === '#/login', 'без входа — экран входа');
+      await login(page, ctl, { expect: '#/requests' });
+      const scr = '.screen:not(.leaving)';
+      ok((await page.evaluate(() => location.hash)) === '#/requests' && (await page.locator(`${scr} .page-title`).innerText()) === 'Заявки', 'после входа открылся список заявок из push (организаций две — выбор пропущен)');
+      ok(ctl.calls.some((c) => c.path === '/notifications/read' && c.body && (c.body.ids || []).includes('n_b1')), 'уведомление о пачке отмечено прочитанным');
+      ok(ctl.calls.some((c) => c.path === '/orgs/org_test/requests' && c.query.tab === 'pending'), 'список — организации из push, вкладка «Ждут решения»');
+      // открыта «Решённые», приходит ещё одна пачка — список снова на «Ждут решения»
+      await page.locator(`${scr} [data-act="req-tab"][data-v="done"]`).click();
+      await settle(page, 700);
+      await page.evaluate(() => { location.hash = '#/home'; });
+      await settle(page, 800);
+      await page.evaluate(() => { location.hash = '#/requests?org=org_test&n=n_b2'; });
+      await page.waitForFunction(() => location.hash === '#/requests', null, { timeout: 8000 });
+      await settle(page, 900);
+      ok(norm(await page.locator(`${scr} .seg-btn.on`).innerText()).startsWith('Ждут решения'), 'push пачки открывает вкладку «Ждут решения», даже если раньше была открыта «Решённые»');
+      // строка уведомления с link { kind: "requests" } — тот же список
+      await page.locator(`${scr} [data-act="req-tab"][data-v="done"]`).click();
+      await settle(page, 700);
+      ctl.override = (call, { json }) => (call.path === '/notifications' ? (json(200, { unread_count: 1, items: [
+        { id: 'n_b3', org_id: 'org_test', type: 'request_batch', created_at: T(TODAY, '10:12'), title: 'На согласование: 3 заявки', text: 'Откройте, чтобы посмотреть', link: { kind: 'requests', org_id: 'org_test' }, read: false },
+      ], next_cursor: null }), true) : false);
+      await page.evaluate(() => { location.hash = '#/notifications'; });
+      await settle(page, 900);
+      ok(norm(await page.locator(`${scr} .notif`).innerText()).includes('На согласование: 3 заявки'), 'уведомления: строка «На согласование: 3 заявки»');
+      await page.locator(`${scr} .notif`).click();
+      await page.waitForFunction(() => location.hash === '#/requests', null, { timeout: 8000 });
+      await settle(page, 900);
+      ok(norm(await page.locator(`${scr} .seg-btn.on`).innerText()).startsWith('Ждут решения'), 'строка уведомления о пачке открывает «Ждут решения»');
+      noErrors(errors);
+      await ctx.close();
+    }
+
     console.log('\n▶ Push (контракт, 9)');
     {
       const { ctx, page, errors, ctl } = await newCtx({ viewport: { width: 1280, height: 900 } });
@@ -2870,6 +2907,17 @@ const PUSH_STUB = () => {
       handlers.push({ data: { json: () => ({ type: 'counterparty_request', org_id: 'org_alfa' }) }, waitUntil: (p) => { wait = p; } });
       await wait;
       ok(shown[3] && shown[3].t === 'Запрос контрагента' && shown[3].o.data.hash === '#/cr?org=org_alfa', 'push без идентификатора запроса → список запросов');
+      // 1.3.1: пачка новых заявок (Посредник склеивает push за 30 с)
+      handlers.push({ data: { json: () => ({ type: 'request_batch', title: 'На согласование: 3 заявки', body: 'Откройте, чтобы посмотреть', org_id: 'org_alfa', count: 3, notification_id: 'n_9b01', sent_at: T(TODAY, '10:12') }) }, waitUntil: (p) => { wait = p; } });
+      await wait;
+      ok(shown[4] && shown[4].t === 'На согласование: 3 заявки' && shown[4].o.body === 'Откройте, чтобы посмотреть' && shown[4].o.data.hash === '#/requests?org=org_alfa&n=n_9b01', 'push request_batch: title как прислал сервер, нажатие → список заявок организации с notification_id');
+      ok(shown[4].o.tag === 'batch-org_alfa', 'тег batch-<org_id>: следующая пачка той же организации заменяет прежнюю');
+      handlers.notificationclick({ notification: { close() {}, data: shown[4].o.data }, waitUntil: (p) => { wait = p; } });
+      await wait;
+      ok(posted[posted.length - 1] && posted[posted.length - 1].hash === '#/requests?org=org_alfa&n=n_9b01', 'нажатие на пачку при открытом приложении — тот же адрес');
+      handlers.push({ data: { json: () => ({ type: 'request_batch', org_id: 'org_beta', count: 2 }) }, waitUntil: (p) => { wait = p; } });
+      await wait;
+      ok(shown[5] && shown[5].t === 'Новые заявки на согласование' && shown[5].o.tag === 'batch-org_beta' && shown[5].o.data.hash === '#/requests?org=org_beta', 'пачка без title — «Новые заявки на согласование»; другая организация — свой тег');
     }
 
     // ---------- 6б. этап 2: 501 not_implemented ----------

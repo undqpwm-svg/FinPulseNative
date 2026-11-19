@@ -1,6 +1,6 @@
 // Сервис-воркер: оболочка приложения (сначала сеть, без сети — кэш) и push-уведомления.
 // Ответы API (api.smartsol.pro) НЕ кэшируются и не проходят через кэш: данные клиента не оседают на устройстве.
-const CACHE = 'finpuls-v22';
+const CACHE = 'finpuls-v23';
 const SHELL = [
   './', './index.html', './css/app.css', './manifest.webmanifest', './data/demo.json', './data/projects.json',
   './js/app.js', './js/config.js', './js/screens.js', './js/store.js', './js/ui.js', './js/util.js', './js/icons.js', './js/push.js',
@@ -38,12 +38,18 @@ self.addEventListener('fetch', (e) => {
 
 // ---------- push ----------
 // Контракт v1, 9.3: { type, title, body, org_id, request_id, notification_id, sent_at }; 13.22 — то же с
-// type: "counterparty_request" и counterparty_request_id вместо request_id.
+// type: "counterparty_request" и counterparty_request_id вместо request_id; request_batch — пачка новых заявок:
+// { type, title, body, org_id, count, notification_id, sent_at }, без request_id.
 // В push нет сумм и контрагентов — детали приложение запрашивает у сервера при открытии.
 function hashFor(d) {
   if (d.type === 'request' && d.request_id) {
     const q = [d.org_id ? `org=${encodeURIComponent(d.org_id)}` : '', d.notification_id ? `n=${encodeURIComponent(d.notification_id)}` : ''].filter(Boolean).join('&');
     return `#/requests/${encodeURIComponent(d.request_id)}${q ? `?${q}` : ''}`;
+  }
+  // Пачка новых заявок (request_batch, с 1.3.1): Посредник склеивает push за 30 с — список «Ждут решения» организации.
+  if (d.type === 'request_batch') {
+    const q = [d.org_id ? `org=${encodeURIComponent(d.org_id)}` : '', d.notification_id ? `n=${encodeURIComponent(d.notification_id)}` : ''].filter(Boolean).join('&');
+    return `#/requests${q ? `?${q}` : ''}`;
   }
   // Запрос контрагента (13.22): карточка запроса; нет идентификатора — список запросов.
   if (d.type === 'counterparty_request') {
@@ -60,10 +66,11 @@ self.addEventListener('push', (e) => {
   } catch (err) {
     d = {};
   }
-  const title = d.title || (d.type === 'request' ? 'Новая заявка на согласование' : d.type === 'counterparty_request' ? 'Запрос контрагента' : 'ФинПульс');
+  const title = d.title || (d.type === 'request' ? 'Новая заявка на согласование' : d.type === 'request_batch' ? 'Новые заявки на согласование' : d.type === 'counterparty_request' ? 'Запрос контрагента' : 'ФинПульс');
   e.waitUntil(self.registration.showNotification(title, {
     body: d.body || 'Откройте, чтобы посмотреть',
-    tag: d.request_id ? `request-${d.request_id}` : d.counterparty_request_id ? `cr-${d.counterparty_request_id}` : d.notification_id || undefined,
+    // Пачка той же организации заменяет прежнюю, а не добавляется второй строкой.
+    tag: d.type === 'request_batch' ? `batch-${d.org_id || ''}` : d.request_id ? `request-${d.request_id}` : d.counterparty_request_id ? `cr-${d.counterparty_request_id}` : d.notification_id || undefined,
     renotify: true,
     icon: 'icons/icon-192.png',
     badge: 'icons/icon-192.png',

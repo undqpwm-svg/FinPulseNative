@@ -1465,6 +1465,12 @@ async function requestList() {
   };
 }
 
+// Вход в список заявок из push пачки (request_batch) или строки уведомления: вкладка «Ждут решения».
+export function showPendingRequests() {
+  ui.reqTab = 'pending';
+  ui.leaving = null;
+}
+
 actions['req-tab'] = (t) => {
   if (ui.reqTab === t.dataset.v) return;
   ui.reqTab = t.dataset.v;
@@ -1626,9 +1632,8 @@ actions['bulk-confirm'] = () => {
   if (!picked.length) return;
   bulk.res = new Map();
   const over = picked.filter((r) => r.overLimit > 0);
-  openSheet(`<div class="sheet-title">Согласовать ${picked.length} ${plural(picked.length, REQ_ACC)}?</div>
-    <div class="confirm-sum">${money(sum(picked, (r) => r.amount))}</div>
-    <p class="confirm-sub">Каждая заявка согласуется в учёте отдельно</p>
+  openSheet(`<div class="sheet-title" data-bulk-q>Согласовать ${picked.length}${NB}${plural(picked.length, REQ_ACC)} на${NB}${money(sum(picked, (r) => r.amount))}?</div>
+    <p class="confirm-sub bulk-sub">Каждая заявка согласуется в учёте отдельно</p>
     ${over.length ? `<div class="over-note compact">${I.alert}<div><b>Сверх лимита: ${over.length} из ${picked.length}</b><span>Превышение — ${money(sum(over, (r) => r.overLimit))}</span></div></div>` : ''}
     <div class="bk-list plain" data-bulk-list>${picked.map(bulkRow).join('')}</div>
     <div class="sheet-actions">
@@ -3394,6 +3399,7 @@ actions['dds-sel'] = (t) => {
 const N_IC = {
   payment: ['in', I.arrowIn],
   request: ['req', I.requests],
+  request_batch: ['req', I.requests], // пачка новых заявок (1.3.1)
   cr: ['req', I.chat], // запрос контрагента (13.22)
   gap: ['gap', I.alert],
   summary: ['sum', I.sun],
@@ -3465,6 +3471,7 @@ actions['open-notif'] = (t) => {
     return;
   }
   const h = linkToHash(n.link);
+  if (n.link === 'requests') showPendingRequests();
   if (h) navigate(h, 'push');
   else nav.rerender();
 };

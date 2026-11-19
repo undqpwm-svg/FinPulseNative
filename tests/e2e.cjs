@@ -523,7 +523,8 @@ async function runFlow(browser, name, opts, isPhone) {
   if (isPhone) await shot(page, '37-zayavki-vybor');
   await tap(page, '[data-bulk-go]');
   await settle(page, 500);
-  ok((await page.locator('.sheet-wrap').innerText().then(norm)).includes('Согласовать 2 заявки?') && await page.locator('.sheet-wrap .bk-row').count() === 2, 'демо: подтверждение со списком двух заявок');
+  const bulkSum = bulkBtn.split('·').pop().trim();
+  ok((await page.locator('.sheet-wrap [data-bulk-q]').innerText().then(norm)).trim() === `Согласовать 2 заявки на ${bulkSum}?` && await page.locator('.sheet-wrap .bk-row').count() === 2, 'демо: подтверждение со списком двух заявок');
   await noHScroll(page, 'Заявки, подтверждение');
   if (isPhone) await shot(page, '38-zayavki-podtverzhdenie');
   await tap(page, '[data-act="bulk-send"]');
@@ -685,6 +686,21 @@ async function runFlow(browser, name, opts, isPhone) {
   await tab(page, '#/home');
   await settle(page);
   ok((await page.locator(`${S} .cr-home`).innerText().then(norm)).includes('Запросы контрагентов: 2') && (await tabBadge(page)) === '5', 'демо: на главной число запросов уменьшилось до 2, значок вкладки «Заявки» — 5 (3 заявки и 2 запроса)');
+
+  // строка уведомления о пачке заявок ведёт в «Ждут решения»
+  await tab(page, '#/requests');
+  await settle(page);
+  await tap(page, '[data-act="req-tab"][data-v="done"]');
+  await settle(page, 400);
+  await tab(page, '#/home');
+  await settle(page);
+  await tap(page, '.icon-btn[data-go="#/notifications"]');
+  await settle(page);
+  await tap(page, '.notif:has-text("На согласование: 3 заявки")');
+  await settle(page);
+  ok((await screenKey(page)) === '#/requests' && (await page.locator(`${S} .seg-btn.on`).innerText().then(norm)).startsWith('Ждут решения'), 'демо: уведомление «На согласование: 3 заявки» открывает «Ждут решения»');
+  await tab(page, '#/home');
+  await settle(page);
 
   // строка в уведомлениях ведёт в карточку
   await tap(page, '.icon-btn[data-go="#/notifications"]');

@@ -69,8 +69,9 @@ self.addEventListener('push', (e) => {
   const title = d.title || (d.type === 'request' ? 'Новая заявка на согласование' : d.type === 'request_batch' ? 'Новые заявки на согласование' : d.type === 'counterparty_request' ? 'Запрос контрагента' : 'ФинПульс');
   e.waitUntil(self.registration.showNotification(title, {
     body: d.body || 'Откройте, чтобы посмотреть',
-    // Пачка той же организации заменяет прежнюю, а не добавляется второй строкой.
-    tag: d.type === 'request_batch' ? `batch-${d.org_id || ''}` : d.request_id ? `request-${d.request_id}` : d.counterparty_request_id ? `cr-${d.counterparty_request_id}` : d.notification_id || undefined,
+    // Пачка — своё уведомление на каждый push, прежнее не заменяется: если пачка разорвалась на две, на экране
+    // останутся «4 заявки» и «2 заявки», в сумме верно (решение основной сессии 19.11).
+    tag: d.type === 'request_batch' ? `batch-${d.notification_id || `${d.org_id || ''}-${d.sent_at || Date.now()}`}` : d.request_id ? `request-${d.request_id}` : d.counterparty_request_id ? `cr-${d.counterparty_request_id}` : d.notification_id || undefined,
     renotify: true,
     icon: 'icons/icon-192.png',
     badge: 'icons/icon-192.png',

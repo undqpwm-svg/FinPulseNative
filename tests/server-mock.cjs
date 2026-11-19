@@ -2911,13 +2911,17 @@ const PUSH_STUB = () => {
       handlers.push({ data: { json: () => ({ type: 'request_batch', title: 'На согласование: 3 заявки', body: 'Откройте, чтобы посмотреть', org_id: 'org_alfa', count: 3, notification_id: 'n_9b01', sent_at: T(TODAY, '10:12') }) }, waitUntil: (p) => { wait = p; } });
       await wait;
       ok(shown[4] && shown[4].t === 'На согласование: 3 заявки' && shown[4].o.body === 'Откройте, чтобы посмотреть' && shown[4].o.data.hash === '#/requests?org=org_alfa&n=n_9b01', 'push request_batch: title как прислал сервер, нажатие → список заявок организации с notification_id');
-      ok(shown[4].o.tag === 'batch-org_alfa', 'тег batch-<org_id>: следующая пачка той же организации заменяет прежнюю');
+      ok(shown[4].o.tag === 'batch-n_9b01', 'тег batch-<notification_id>: своё уведомление на каждую пачку');
       handlers.notificationclick({ notification: { close() {}, data: shown[4].o.data }, waitUntil: (p) => { wait = p; } });
       await wait;
       ok(posted[posted.length - 1] && posted[posted.length - 1].hash === '#/requests?org=org_alfa&n=n_9b01', 'нажатие на пачку при открытом приложении — тот же адрес');
-      handlers.push({ data: { json: () => ({ type: 'request_batch', org_id: 'org_beta', count: 2 }) }, waitUntil: (p) => { wait = p; } });
+      // пачка разорвалась на две: вторая не заменяет первую — на экране «4 заявки» и «2 заявки»
+      handlers.push({ data: { json: () => ({ type: 'request_batch', title: 'На согласование: 2 заявки', org_id: 'org_alfa', count: 2, notification_id: 'n_9b02', sent_at: T(TODAY, '10:13') }) }, waitUntil: (p) => { wait = p; } });
       await wait;
-      ok(shown[5] && shown[5].t === 'Новые заявки на согласование' && shown[5].o.tag === 'batch-org_beta' && shown[5].o.data.hash === '#/requests?org=org_beta', 'пачка без title — «Новые заявки на согласование»; другая организация — свой тег');
+      ok(shown[5] && shown[5].o.tag === 'batch-n_9b02' && shown[5].o.tag !== shown[4].o.tag, 'вторая пачка той же организации — своё уведомление, первая не заменяется');
+      handlers.push({ data: { json: () => ({ type: 'request_batch', org_id: 'org_beta', count: 2, sent_at: T(TODAY, '10:14') }) }, waitUntil: (p) => { wait = p; } });
+      await wait;
+      ok(shown[6] && shown[6].t === 'Новые заявки на согласование' && shown[6].o.tag === `batch-org_beta-${T(TODAY, '10:14')}` && shown[6].o.data.hash === '#/requests?org=org_beta', 'пачка без title и notification_id — «Новые заявки на согласование», тег всё равно свой');
     }
 
     // ---------- 6б. этап 2: 501 not_implemented ----------

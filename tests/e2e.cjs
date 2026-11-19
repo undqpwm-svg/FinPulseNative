@@ -180,7 +180,7 @@ async function runFlow(browser, name, opts, isPhone) {
   ok(heroText.includes('12 480 000') && heroText.includes('11 830 000') && heroText.includes('650 000'), 'деньги на сегодня: итого, банк, касса');
   ok((await page.locator('.alert-card b').innerText().then(norm)).includes('В четверг не хватит 1,2 млн ₸'), 'предупреждение «В четверг не хватит 1,2 млн ₸»');
   ok((await homeCount(page)) === 'На согласовании: 3', 'плашка «На согласовании: 3»');
-  ok((await tabBadge(page)) === '3', 'бейдж 3 на вкладке «Заявки»');
+  ok((await tabBadge(page)) === '8', 'бейдж 8 на вкладке «Заявки»: 3 заявки на согласовании и 5 запросов контрагентов');
   await noHScroll(page, 'Главная');
   const homeRec = await page.locator('.screen:not(.leaving) .rec-card').innerText().then(norm);
   ok(homeRec.includes('Долг по возрасту') && homeRec.includes('> 60 дней') && !/просроч|в срок/i.test(homeRec), 'главная: долг по возрасту, без «просрочено»');
@@ -274,7 +274,7 @@ async function runFlow(browser, name, opts, isPhone) {
   await page.waitForFunction(() => location.hash === '#/requests');
   await settle(page, 1300);
   ok(await page.locator('.screen:not(.leaving) .req-card').count() === 2, 'заявка ушла из списка');
-  ok((await tabBadge(page)) === '2', 'бейдж вкладки уменьшился до 2');
+  ok((await tabBadge(page)) === '7', 'бейдж вкладки уменьшился до 7 (2 заявки и 5 запросов контрагентов)');
 
   // отклонение без комментария и с комментарием
   await tap(page, '.req-card[data-go="#/requests/r102"]');
@@ -577,7 +577,7 @@ async function runFlow(browser, name, opts, isPhone) {
   await settle(page, 400);
   await tap(page, '[data-act="reset-confirm"]');
   await settle(page, 600);
-  ok((await tabBadge(page)) === '3', '«Сбросить демо» возвращает 3 заявки');
+  ok((await tabBadge(page)) === '8', '«Сбросить демо» возвращает 3 заявки и 5 запросов контрагентов (бейдж 8)');
 
   // --- запросы контрагентов (бот в WhatsApp): экран есть у «Альфа Логистик» ---
   const S = '.screen:not(.leaving)';
@@ -592,7 +592,7 @@ async function runFlow(browser, name, opts, isPhone) {
   if (isPhone) await shot(page, '44-glavnaya-zaprosy-kontragentov');
   await tab(page, '#/requests');
   await settle(page);
-  ok((await page.locator(`${S} .cr-entry`).innerText().then(norm)).replace(/\s+/g, ' ').trim() === 'Запросы контрагентов 5' && (await tabBadge(page)) === '3', 'демо: вход из «Заявок» со значком 5; значок вкладки — только заявки');
+  ok((await page.locator(`${S} .cr-entry`).innerText().then(norm)).replace(/\s+/g, ' ').trim() === 'Запросы контрагентов 5' && (await tabBadge(page)) === '8' && (await page.locator(`${S} .seg-btn.on`).innerText().then(norm)).trim() === 'Ждут решения · 3', 'демо: вход из «Заявок» со значком 5, «Ждут решения · 3»; значок вкладки — сумма, 8');
   if (isPhone) await shot(page, '45-zayavki-vhod-v-zaprosy');
   await tap(page, '.cr-entry');
   await settle(page);
@@ -684,7 +684,7 @@ async function runFlow(browser, name, opts, isPhone) {
   ok((await screenKey(page)) !== '#/cr', 'демо: «Назад» из списка запросов уводит с него с первого нажатия');
   await tab(page, '#/home');
   await settle(page);
-  ok((await page.locator(`${S} .cr-home`).innerText().then(norm)).includes('Запросы контрагентов: 2'), 'демо: на главной число запросов уменьшилось до 2');
+  ok((await page.locator(`${S} .cr-home`).innerText().then(norm)).includes('Запросы контрагентов: 2') && (await tabBadge(page)) === '5', 'демо: на главной число запросов уменьшилось до 2, значок вкладки «Заявки» — 5 (3 заявки и 2 запроса)');
 
   // строка в уведомлениях ведёт в карточку
   await tap(page, '.icon-btn[data-go="#/notifications"]');
@@ -700,7 +700,7 @@ async function runFlow(browser, name, opts, isPhone) {
   await settle(page, 300);
   await tab(page, '#/home');
   await settle(page);
-  ok(await page.locator(`${S} [data-cr-entry]`).count() === 0, 'демо: у «Север Трейд» входа на экран запросов нет');
+  ok(await page.locator(`${S} [data-cr-entry]`).count() === 0 && (await tabBadge(page)) === (await homeCount(page)).replace(/\D/g, ''), 'демо: у «Север Трейд» входа на экран запросов нет, значок вкладки — только заявки');
   await tab(page, '#/requests');
   await settle(page);
   ok(await page.locator(`${S} [data-cr-entry]`).count() === 0, 'демо: и во вкладке «Заявки» у «Север Трейд» его нет');

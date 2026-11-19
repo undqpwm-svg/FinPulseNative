@@ -163,6 +163,7 @@ export function onUnauthorized(e) {
   invalidate();
   ui.tg = null;
   nav.badge = null;
+  nav.crBadge = null;
   // Доступ выключил администратор (403 access_revoked) — показать его текст на экране входа.
   if (e instanceof ApiError && e.code === 'access_revoked') {
     ui.loginNotice = e.message || 'Доступ к приложению выключен. Обратитесь к администратору ФинПульса в своей компании.';
@@ -931,6 +932,7 @@ actions['pick-org'] = (t) => {
   api.setOrgId(t.dataset.id);
   invalidate();
   nav.badge = null;
+  nav.crBadge = null;
   if (prev && prev !== t.dataset.id) toast('Организация переключена');
   const link = pendingLink();
   takeLink();
@@ -2320,20 +2322,23 @@ const waits = (n) => (n % 10 === 1 && n % 100 !== 11 ? 'ждёт' : 'ждут');
 // Число ожидающих для значка на входе в экран. null — экрана у организации нет, вход не показываем.
 // Список ожидающих читается только там, где экран есть; ответ живёт 20 секунд — главная и «Заявки» его делят.
 async function crBadge(org) {
-  let base;
+  let base = null;
   try {
     base = await api.crCount(org);
   } catch (e) {
-    return null;
+    base = null;
   }
-  if (base === null || base === undefined) return null;
-  try {
-    const l = await cached(`cr:${org}:pending`, 20000, () => api.crList(org, 'pending'));
-    return l.more ? Math.max(base, l.items.length) : l.items.length;
-  } catch (e) {
-    if (isSessionEnd(e)) throw e;
-    return base;
+  let n = base === undefined ? null : base;
+  if (n !== null) {
+    try {
+      const l = await cached(`cr:${org}:pending`, 20000, () => api.crList(org, 'pending'));
+      n = l.more ? Math.max(base, l.items.length) : l.items.length;
+    } catch (e) {
+      if (isSessionEnd(e)) throw e;
+    }
   }
+  nav.crBadge = n; // значок вкладки «Заявки» — заявки на согласование плюс ожидающие запросы контрагентов (app.js)
+  return n;
 }
 
 // Вход на экран с главной: карточка под заявками.
@@ -2390,6 +2395,7 @@ async function crListView() {
     }
     throw e;
   }
+  if (tab === 'pending') nav.crBadge = data.more ? Math.max(nav.crBadge || 0, (data.items || []).length) : (data.items || []).length;
   ui.crListIdx = histIdx(); // по этой записи истории «к списку» после решения возвращается назад, а не открывает второй список
   const items = data.items || [];
   const list = items.length
@@ -2712,6 +2718,7 @@ async function crSubmit(action, payload, btn) {
   ui.busy = false;
   ui.crDecision = null;
   invalidate();
+  if (nav.crBadge > 0) nav.crBadge -= 1; // из «Ждут» запрос ушёл — значок вкладки «Заявки» меньше на один
   await closeSheet();
   const card = res && res.card;
   // Подтверждено, но WhatsApp сообщение не принял: 1С повторит отправку сама. Остаёмся в карточке из ответа.
@@ -3614,6 +3621,7 @@ actions['switch-org'] = (t) => {
   api.setOrgId(t.dataset.id);
   invalidate();
   nav.badge = null;
+  nav.crBadge = null;
   const list = t.closest('.list');
   (list ? [...list.querySelectorAll('[data-act="switch-org"]')] : []).forEach((b) => {
     const mark = b.querySelector('.li-check, .li-radio');
@@ -3654,6 +3662,7 @@ actions['reset-confirm'] = async () => {
   ui.leaving = null;
   ui.ddsSel = null;
   nav.badge = ((await api.requests(api.orgId(), 'pending')).items || []).length;
+  await crBadge(api.orgId()).catch(() => null);
   await closeSheet();
   nav.rerender();
   toast('Демо сброшено');
@@ -3667,6 +3676,7 @@ actions.logout = async () => {
   ui.tg = null;
   ui.loginPhone = null;
   nav.badge = null;
+  nav.crBadge = null;
   if (demo) setMode('server');
   replace('#/login', 'fade');
 };
@@ -3697,6 +3707,7 @@ actions['logout-all-confirm'] = async (t) => {
   invalidate();
   ui.tg = null;
   nav.badge = null;
+  nav.crBadge = null;
   if (demo) setMode('server');
   replace('#/login', 'fade');
   setTimeout(() => toast('Вы вышли на всех устройствах'), 60);

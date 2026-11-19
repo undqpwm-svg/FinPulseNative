@@ -93,6 +93,7 @@ async function route() {
       api.setOrgId(qOrg);
       invalidate();
       nav.badge = null;
+      nav.crBadge = null;
     }
     if (qNote) api.markRead(api.orgId(), qNote).catch(() => {});
     replaceHash(location.hash.split('?')[0]);
@@ -226,7 +227,8 @@ function chrome(v) {
 }
 
 function renderTabbar(active) {
-  const pend = nav.badge || 0;
+  // Вход в «Запросы контрагентов» живёт во вкладке «Заявки»: на значке — заявки на согласование плюс ожидающие запросы.
+  const pend = (nav.badge || 0) + (nav.crBadge || 0);
   tabbar.innerHTML = TABS.map((t) => `<button class="tab ${t.id === active ? 'on' : ''}" data-go="${t.hash}" aria-label="${t.label}" ${t.id === active ? 'aria-current="page"' : ''}>
       <span class="tab-ic">${t.icon}${t.id === 'requests' && pend ? `<span class="tab-badge">${pend}</span>` : ''}</span>
       <span class="tab-label">${t.label}</span>

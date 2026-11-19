@@ -2450,7 +2450,7 @@ const PUSH_STUB = () => {
       await settle(page, 800);
       await login(page, ctl);
       const scr = '.screen:not(.leaving)';
-      ok(await page.locator(`${scr} [data-cr-entry]`).count() === 0, 'поля нет (база до 1.17.0, бот выключен, нет роли): на главной входа нет');
+      ok(await page.locator(`${scr} [data-cr-entry]`).count() === 0 && (await page.evaluate(() => document.querySelector('.tab-badge')?.textContent || '0')) === '1', 'поля нет (база до 1.17.0, бот выключен, нет роли): на главной входа нет, значок вкладки — только заявки');
       await page.evaluate(() => { location.hash = '#/requests'; });
       await settle(page, 800);
       ok(await page.locator(`${scr} [data-cr-entry]`).count() === 0, 'поля нет: во вкладке «Заявки» входа нет');
@@ -2494,7 +2494,7 @@ const PUSH_STUB = () => {
       await page.evaluate(() => { location.hash = '#/requests'; });
       await settle(page, 800);
       ok(norm(await page.locator(`${scr} .cr-entry`).innerText()).replace(/\s+/g, ' ').trim() === 'Запросы контрагентов 3' && lists('pending') === 1, '«Заявки»: строка входа со значком 3, список повторно не читается');
-      ok((await page.evaluate(() => document.querySelector('.tab-badge')?.textContent || '0')) === '1', 'значок вкладки «Заявки» — по-прежнему только заявки на согласование');
+      ok((await page.evaluate(() => document.querySelector('.tab-badge')?.textContent || '0')) === '4', 'значок вкладки «Заявки» — сумма: 1 заявка на согласовании и 3 запроса контрагентов');
       await page.locator(`${scr} .cr-entry`).click();
       await settle(page, 900);
       // список
@@ -2647,6 +2647,7 @@ const PUSH_STUB = () => {
       await settle(page, 900);
       const empty = norm(await page.locator(`${scr} .cr-home`).innerText());
       ok(empty.includes('Запросы контрагентов') && empty.includes('Новых запросов нет'), 'главная: «Новых запросов нет» — вход остаётся');
+      ok((await page.evaluate(() => document.querySelector('.tab-badge')?.textContent || '0')) === '1', 'запросы решены — на значке вкладки «Заявки» осталась одна заявка');
       noErrors(errors);
       await ctx.close();
     }

@@ -17,9 +17,10 @@ const supported = () => 'serviceWorker' in navigator && 'PushManager' in window 
 //  granted       — разрешено;
 //  denied        — запрещено (включается только в настройках телефона).
 export function pushState() {
-  // Тестовый сервер (?api=test): подписка push у телефона одна на сайт, и она принадлежит рабочему серверу.
-  // Тестовая вкладка её не читает, не отправляет на тестовый сервер и не отменяет при выходе.
-  if (isTestEnv()) return 'unsupported';
+  // Тестовый сервер (?api=test, с 1.3.2): push только на компьютере. На iPhone push есть лишь у приложения на экране
+  // «Домой», а оно всегда открывается на рабочем сервере. Подписка браузера одна на сайт (на профиль Chrome):
+  // тестовая вкладка регистрирует её и на тестовом сервере, но никогда не отменяет и не заменяет рабочую (ниже).
+  if (isTestEnv() && isIOS()) return 'unsupported';
   if (isIOS() && !isStandalone()) return 'needs-install';
   if (!supported()) return 'unsupported';
   return Notification.permission;
@@ -43,6 +44,19 @@ function keyToUint8(base64url) {
   return Uint8Array.from([...raw].map((c) => c.charCodeAt(0)));
 }
 
+// Ключ VAPID, которым сделана подписка (base64url без «=»), или null, если браузер его не сообщает.
+function keyOf(sub) {
+  try {
+    const k = sub && sub.options && sub.options.applicationServerKey;
+    if (!k) return null;
+    const bytes = new Uint8Array(k);
+    return btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  } catch (e) {
+    return null;
+  }
+}
+const sameKey = (a, b) => String(a || '').replace(/=+$/, '') === String(b || '').replace(/=+$/, '');
+
 // Для подписки: дождаться активного service worker (не дольше 4 с).
 async function registration() {
   if (!('serviceWorker' in navigator)) return null;
@@ -61,7 +75,10 @@ async function existing() {
 }
 
 // Включить уведомления. Вызывать только из нажатия пользователя (иначе браузер не покажет запрос).
-// Возвращает { ok, reason } — reason: 'needs-install', 'unsupported', 'denied', 'no-key', 'error'.
+// Возвращает { ok, reason } — reason: 'needs-install', 'unsupported', 'denied', 'no-key', 'other-key', 'error'.
+// Подписка сделана другим ключом VAPID (у рабочего и тестового серверов ключи могут быть разные):
+//  - рабочий сервер — старая подписка снимается и делается новая (её ключом push от рабочего сервера не дойдёт);
+//  - тестовая вкладка — ничего не трогаем, 'other-key': рабочая подписка этого профиля браузера дороже теста.
 export async function enablePush() {
   const st = pushState();
   if (st === 'needs-install' || st === 'unsupported') return { ok: false, reason: st };
@@ -75,6 +92,12 @@ export async function enablePush() {
     const reg = await registration();
     if (!reg) return { ok: false, reason: 'unsupported' };
     let sub = await reg.pushManager.getSubscription();
+    const have = keyOf(sub);
+    if (sub && have && !sameKey(have, cfg.vapidPublicKey)) {
+      if (isTestEnv()) return { ok: false, reason: 'other-key' };
+      await sub.unsubscribe();
+      sub = null;
+    }
     if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: keyToUint8(cfg.vapidPublicKey) });
     await api.savePushSubscription(sub.toJSON());
     return { ok: true };
@@ -89,7 +112,20 @@ export async function syncPush() {
   try {
     const reg = await existing();
     const sub = reg && (await reg.pushManager.getSubscription());
-    if (sub) await api.savePushSubscription(sub.toJSON());
+    if (!sub) return;
+    // Подписка сделана другим ключом (её завела тестовая вкладка этого профиля браузера): тестовая вкладка её не
+    // трогает; рабочий сервер важнее — подписка заменяется на сделанную его ключом (разрешение уже есть).
+    let fresh = sub;
+    const have = keyOf(sub);
+    if (have) {
+      const cfg = await api.pushConfig();
+      if (cfg && cfg.vapidPublicKey && !sameKey(have, cfg.vapidPublicKey)) {
+        if (isTestEnv()) return;
+        await sub.unsubscribe();
+        fresh = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: keyToUint8(cfg.vapidPublicKey) });
+      }
+    }
+    await api.savePushSubscription(fresh.toJSON());
   } catch (e) {
     /* не критично: подписка обновится при следующем входе */
   }
@@ -97,8 +133,13 @@ export async function syncPush() {
 
 // При выходе: перестать получать push этого пользователя на этом устройстве.
 export async function disablePush() {
-  if (isTestEnv()) return;
   try {
+    // Тестовая вкладка: устройство снимается только на тестовом сервере, подписка браузера остаётся — она же у
+    // рабочего сервера.
+    if (isTestEnv()) {
+      await api.deletePushSubscription().catch(() => {});
+      return;
+    }
     const reg = await existing();
     const sub = reg && (await reg.pushManager.getSubscription());
     if (!sub) return;

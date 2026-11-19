@@ -1,7 +1,7 @@
 // Экраны и действия. Данные — только через api.* (js/api/index.js): экран не знает, демо это или 1С.
 // Каждый экран — async-функция: получает DTO (spec/api-client.md) и возвращает { key, html, … }.
 import { api, isDemo, setMode, ApiError } from './api/index.js';
-import { CONFIG } from './config.js';
+import { CONFIG, isTestEnv } from './config.js';
 import { uuid, storage } from './api/core.js';
 import { I, logoMark } from './icons.js';
 import { navigate, replace, back as goBack, histIdx, openSheet, closeSheet, setSheet, sheetOpen, toast, success, nav } from './ui.js';
@@ -1129,6 +1129,7 @@ actions['push-enable'] = async () => {
   else if (r.reason === 'needs-install') toast('Сначала добавьте приложение на экран «Домой»', 'info');
   else if (r.reason === 'denied') toast('Уведомления запрещены — включите в настройках телефона', 'info');
   else if (r.reason === 'no-key') toast('Уведомления заработают после подключения сервера', 'info');
+  else if (r.reason === 'other-key') toast('В этом профиле браузера уведомления уже подключены к рабочему серверу. Для теста откройте отдельный профиль Chrome', 'info');
   else toast('Не удалось включить уведомления', 'error');
   if (location.hash.startsWith('#/profile')) nav.rerender();
 };
@@ -3538,8 +3539,11 @@ function toggleRow([k, title, desc], st) {
 function pushRow() {
   const st = pushState();
   const demoTest = isDemo() && st === 'granted';
+  // Тестовая вкладка: разрешение браузера общее с рабочим сервером, а подписку на тестовом сервере нужно подключить
+  // отдельно — строка нажимается и при «Включены».
+  const testOn = isTestEnv() && st === 'granted';
   const [text, act] = {
-    granted: ['Включены', demoTest ? 'push-test' : ''],
+    granted: testOn ? ['Разрешены · нажмите, чтобы подключить тестовый сервер', 'push-enable'] : ['Включены', demoTest ? 'push-test' : ''],
     default: ['Выключены — нажмите, чтобы включить', 'push-enable'],
     denied: ['Запрещены в настройках телефона', ''],
     'needs-install': ['Добавьте приложение на экран «Домой»', ''],

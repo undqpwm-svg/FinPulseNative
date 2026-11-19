@@ -526,6 +526,37 @@ async function login(page, ctl, { expect = '#/home' } = {}) {
   await settle(page, 700);
 }
 
+// Push на компьютере с ключом VAPID (1.3.2): у подписки есть options.applicationServerKey. preset.key — подписка, которая
+// уже есть в профиле браузера (ключ base64url), preset.perm — разрешение. Подписка, разрешение и счётчики subscribe /
+// unsubscribe живут в localStorage — общие для всех вкладок контекста, как у одного профиля Chrome.
+const PUSH_STUB_KEYS = (preset) => {
+  const LS = '__push_stub';
+  const load = () => JSON.parse(localStorage.getItem(LS) || 'null');
+  if (!load()) localStorage.setItem(LS, JSON.stringify({ perm: preset.perm || 'default', sub: preset.key ? { endpoint: 'https://push.example.org/send/prod-1', key: preset.key } : null, subs: 0, unsubs: 0 }));
+  const st = () => load();
+  const put = (f) => { const s = load(); f(s); localStorage.setItem(LS, JSON.stringify(s)); };
+  Object.defineProperty(window, '__subs', { configurable: true, get: () => st().subs });
+  Object.defineProperty(window, '__unsubs', { configurable: true, get: () => st().unsubs });
+  Object.defineProperty(window, '__subKeyB64', { configurable: true, get: () => (st().sub ? st().sub.key : null) });
+  Object.defineProperty(Notification, 'permission', { configurable: true, get: () => st().perm });
+  Notification.requestPermission = async () => { put((s) => { s.perm = 'granted'; }); return 'granted'; };
+  const toBuf = (b64u) => {
+    const pad = '='.repeat((4 - (b64u.length % 4)) % 4);
+    const raw = atob((b64u + pad).replace(/-/g, '+').replace(/_/g, '/'));
+    return Uint8Array.from([...raw].map((c) => c.charCodeAt(0))).buffer;
+  };
+  const toB64 = (u8) => btoa(String.fromCharCode(...u8)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const make = (s) => (s ? {
+    endpoint: s.endpoint, options: { applicationServerKey: toBuf(s.key) },
+    toJSON() { return { endpoint: this.endpoint, keys: { p256dh: 'BExampleP256dhKey', auth: 'ExampleAuth' } }; },
+    unsubscribe: async () => { put((x) => { x.unsubs += 1; x.sub = null; }); return true; },
+  } : null);
+  const reg = { pushManager: { getSubscription: async () => make(st().sub), subscribe: async (o) => { put((x) => { x.subs += 1; x.sub = { endpoint: `https://push.example.org/send/new-${x.subs}`, key: toB64(o.applicationServerKey) }; }); return make(st().sub); } } };
+  Object.defineProperty(navigator, 'serviceWorker', { configurable: true, value: { ready: Promise.resolve(reg), getRegistration: async () => reg, register: async () => reg, addEventListener() {} } });
+};
+const KEY_PROD = 'BLc4xRzKlKORKWlbdgFaBrrPK3ydWAHo4M0gs0i1oEKgPpWC5cW8OCzVI3YvMClY4f3hHsqeY3m6Iyjn6CbsXzc';
+const KEY_TEST = 'BNcRdreALRFXTkOOUHK1EtK2wtaz5Ry4YfYCA_0QTpQtUbVlUls0VJXg7A8u-Ts1XbjhazAkj7I99e8QcYP7DkM';
+
 // Push в headless-браузере: служба уведомлений недоступна — подменяем подписку и разрешение, проверяем логику приложения.
 const PUSH_STUB = () => {
   window.__perm = 'default';
@@ -907,7 +938,7 @@ const PUSH_STUB = () => {
       const top = await page.locator('.screen:not(.leaving) .org-pill').boundingBox();
       ok(box && top && top.y >= box.y + box.height - 1, 'плашка не закрывает экран: содержимое сдвинуто вниз');
       ok((await page.evaluate(() => localStorage.getItem('finpuls-session'))) === null && !!(await page.evaluate(() => sessionStorage.getItem('finpuls-session'))), 'признак входа тестовой вкладки — в sessionStorage; рабочий localStorage не тронут');
-      ok((await page.locator('.sheet .push-offer').count()) === 0 && !ctl.calls.some((c) => c.path === '/devices'), 'push в тестовой вкладке не предлагается и не регистрируется');
+      ok((await page.locator('.sheet .push-offer').count()) === 0 && !ctl.calls.some((c) => c.path === '/devices'), 'push в тестовой вкладке на iPhone не предлагается и не регистрируется');
       await shot(page, '10-test-plashka');
       await page.locator('.tabbar .tab[data-go="#/requests"]').click();
       await settle(page, 800);
@@ -933,6 +964,91 @@ const PUSH_STUB = () => {
       await settle(page, 900);
       ok((await page.locator('.env-bar').count()) === 0 && ctl.calls.slice(mark).every((c) => c.host === 'api.smartsol.pro'), 'чужой адрес в параметре не принимается: значение сверяется только со словом test');
       noErrors(errors);
+      await ctx.close();
+    }
+
+    console.log('\n▶ Тестовый сервер на компьютере: push с api-test, рабочая подписка не страдает (1.3.2)');
+    const DESK = { viewport: { width: 1280, height: 900 } };
+    const testHost = (c) => c.host === 'api-test.smartsol.pro';
+    const devPosts = (ctl, host) => ctl.calls.filter((c) => c.path === '/devices' && c.method === 'POST' && c.host === host);
+    const openProfile = async (page) => {
+      await page.evaluate(() => { location.hash = '#/profile'; });
+      await settle(page, 900);
+    };
+    {
+      // ключи одинаковые, рабочая подписка уже есть: тестовая вкладка регистрирует её на api-test и ничего не меняет
+      const { ctx, page, errors, ctl } = await newCtx(DESK);
+      await ctx.addInitScript(PUSH_STUB_KEYS, { perm: 'granted', key: KEY_PROD });
+      await page.goto(`${BASE}?api=test`);
+      await settle(page, 900);
+      await login(page, ctl);
+      await settle(page, 1200);
+      const p1 = devPosts(ctl, 'api-test.smartsol.pro');
+      ok(p1.length === 1 && p1[0].body.subscription.endpoint === 'https://push.example.org/send/prod-1', 'ключи одинаковые: после входа та же подписка зарегистрирована на api-test (POST /devices)');
+      ok(ctl.calls.every(testHost) && (await page.evaluate(() => [window.__subs, window.__unsubs].join())) === '0,0', 'новая подписка не делается, рабочая не отменяется, на рабочий сервер запросов нет');
+      await openProfile(page);
+      const row = norm(await page.locator('.li-push').innerText());
+      ok(row.includes('Разрешены') && row.includes('подключить тестовый сервер') && (await page.locator('.li-push').getAttribute('data-act')) === 'push-enable', 'профиль: «Разрешены · нажмите, чтобы подключить тестовый сервер»');
+      await shot(page, '43-test-push-profil');
+      await page.locator('.li-push').click();
+      await page.waitForSelector('.toast.show', { timeout: 6000 });
+      ok(norm(await page.locator('.toast').innerText()).includes('Уведомления включены') && devPosts(ctl, 'api-test.smartsol.pro').length === 2, 'нажатие — повторная регистрация на api-test, «Уведомления включены»');
+      // выход из тестовой вкладки: устройство снимается на api-test, подписка браузера остаётся
+      await page.waitForFunction(() => !document.querySelector('.toast.show'), null, { timeout: 8000 });
+      await page.locator('[data-act="logout"]').click();
+      await page.waitForFunction(() => location.hash === '#/login', null, { timeout: 8000 });
+      await settle(page, 600);
+      ok(ctl.calls.some((c) => c.method === 'DELETE' && c.path === '/devices/dev_1' && testHost(c)) && (await page.evaluate(() => window.__unsubs)) === 0, 'выход из тестовой вкладки: DELETE /devices на api-test, подписка браузера не отменена');
+      noErrors(errors);
+      await ctx.close();
+    }
+    {
+      // ключи разные, в профиле рабочая подписка: тест её не трогает и честно говорит, что нужен отдельный профиль
+      const { ctx, page, errors, ctl } = await newCtx(DESK);
+      await ctx.addInitScript(PUSH_STUB_KEYS, { perm: 'granted', key: KEY_PROD });
+      ctl.override = (call, { json }) => (call.path === '/version' && testHost(call) ? (json(200, { api_version: '1.0', min_app_version: '1.0.0', server_time: T(TODAY, '10:00'), webpush_public_key: KEY_TEST }), true) : false);
+      await page.goto(`${BASE}?api=test`);
+      await settle(page, 900);
+      await login(page, ctl);
+      await settle(page, 1200);
+      ok(devPosts(ctl, 'api-test.smartsol.pro').length === 0, 'ключи разные: подписку с рабочим ключом на api-test не отправляем');
+      await openProfile(page);
+      await page.locator('.li-push').click();
+      await page.waitForSelector('.toast.show', { timeout: 6000 });
+      const t = norm(await page.locator('.toast').innerText());
+      ok(t.includes('уже подключены к рабочему серверу') && t.includes('отдельный профиль Chrome'), 'нажатие — подсказка: уведомления профиля у рабочего сервера, для теста — отдельный профиль Chrome');
+      ok((await page.evaluate(() => [window.__subs, window.__unsubs].join())) === '0,0' && devPosts(ctl, 'api-test.smartsol.pro').length === 0, 'рабочая подписка не отменена и не заменена');
+      noErrors(errors);
+      await ctx.close();
+    }
+    {
+      // ключи разные, профиль чистый (отдельный профиль Chrome): подписка ключом api-test
+      const { ctx, page, errors, ctl } = await newCtx(DESK);
+      await ctx.addInitScript(PUSH_STUB_KEYS, { perm: 'default' });
+      ctl.override = (call, { json }) => (call.path === '/version' && testHost(call) ? (json(200, { api_version: '1.0', min_app_version: '1.0.0', server_time: T(TODAY, '10:00'), webpush_public_key: KEY_TEST }), true) : false);
+      await page.goto(`${BASE}?api=test`);
+      await settle(page, 900);
+      await login(page, ctl);
+      await settle(page, 1500);
+      ok(norm(await page.locator('.sheet .push-offer').innerText()).includes('Уведомления о новых заявках'), 'отдельный профиль: после входа — предложение включить уведомления');
+      await page.locator('.sheet [data-act="push-enable"]').click();
+      await page.waitForSelector('.toast.show', { timeout: 6000 });
+      const key = await page.evaluate(() => window.__subKeyB64);
+      const p = devPosts(ctl, 'api-test.smartsol.pro');
+      ok(key === KEY_TEST && p.length === 1 && p[0].body.subscription.endpoint === 'https://push.example.org/send/new-1', 'подписка ключом api-test и регистрация на api-test');
+      noErrors(errors);
+      // рабочая вкладка в том же профиле: подписку с тестовым ключом рабочему серверу не отправляет; «Включить» — новая подписка
+      const ctl2 = { state: {}, popups: [] };
+      const page2 = await ctx.newPage();
+      await mockApi(page2, ctl2);
+      await page2.goto(BASE);
+      await settle(page2, 900);
+      await login(page2, ctl2);
+      await settle(page2, 1200);
+      const p2 = devPosts(ctl2, 'api.smartsol.pro');
+      ok(p2.length === 1 && p2[0].body.subscription.endpoint === 'https://push.example.org/send/new-2', 'рабочая вкладка в том же профиле: подписка с тестовым ключом заменена рабочей, на рабочий сервер ушла новая');
+      ok((await page2.evaluate((kp) => [window.__unsubs, window.__subKeyB64 === kp].join(), KEY_PROD)) === '1,true', 'тестовая подписка снята, новая — рабочим ключом: у рабочего сервера приоритет');
+      await page2.close();
       await ctx.close();
     }
 

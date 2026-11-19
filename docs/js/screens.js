@@ -4,7 +4,7 @@ import { api, isDemo, setMode, ApiError } from './api/index.js';
 import { CONFIG } from './config.js';
 import { uuid, storage } from './api/core.js';
 import { I, logoMark } from './icons.js';
-import { navigate, replace, openSheet, closeSheet, setSheet, sheetOpen, toast, success, nav } from './ui.js';
+import { navigate, replace, back as goBack, histIdx, openSheet, closeSheet, setSheet, sheetOpen, toast, success, nav } from './ui.js';
 import { enablePush, pushState, shouldOfferPush, markPushOffered, demoNotification, disablePush, syncPush } from './push.js';
 import {
   esc, cap, money, moneyShort, digits, mln, plural, iso, parseISO, diffDays,
@@ -972,7 +972,7 @@ function spark(start, points) {
 views.home = async () => {
   const orgNow = api.orgId();
   // Список отчётов организации уже загружен вместе с /orgs — отдельного запроса обычно нет.
-  const [d, reps] = await Promise.all([api.home(orgNow), api.reportList(orgNow).catch(() => [])]);
+  const [d, reps, crN] = await Promise.all([api.home(orgNow), api.reportList(orgNow).catch(() => []), crBadge(orgNow)]);
   const debtOn = reps.includes('debtors'); // «Нам должны» ведёт в отчёт «Должники», только если база его отдаёт
   const today = D(d.today);
   // Календарь или отчёт ещё не подключены (501) — блоки главной из сводки остаются, но никуда не ведут.
@@ -1070,6 +1070,7 @@ views.home = async () => {
 
       ${alert}
       ${appr}
+      ${crHomeCard(crN)}
 
       <section class="card">
         <div class="card-head"><h2>Ближайшие 7 дней</h2>${calOn ? `<button class="link-btn" data-go="#/calendar">Календарь ${I.chevR}</button>` : ''}</div>
@@ -1411,7 +1412,7 @@ views.requests = (params) => (params[0] ? requestDetail(params[0]) : requestList
 
 async function requestList() {
   const tab = ui.reqTab;
-  const data = await api.requests(api.orgId(), tab);
+  const [data, crN] = await Promise.all([api.requests(api.orgId(), tab), crBadge(api.orgId())]);
   const items = data.items || [];
   const today = data.today;
   let list;
@@ -1437,6 +1438,7 @@ async function requestList() {
     key: 'requests', tab: 'requests', depth: 1, nav: true, title: 'Заявки',
     html: `<div class="scroll">
       <div class="page-head"><h1 class="page-title">Заявки</h1>${canBulk ? '<button class="link-btn bulk-btn when-idle" data-act="bulk-start">Выбрать</button><button class="link-btn bulk-btn when-picking" data-act="bulk-cancel">Отмена</button>' : ''}</div>
+      ${crN === null ? '' : `<button class="cr-entry when-idle" data-go="#/cr" data-cr-entry>${I.chat}<span>Запросы контрагентов</span>${crN ? `<b class="cr-n">${crN}</b>` : ''}${I.chevR}</button>`}
       ${segmented([{ v: 'pending', label: `Ждут решения${tab === 'pending' && items.length ? ` · ${items.length}` : ''}` }, { v: 'done', label: 'Решённые' }], tab, (v) => `data-act="req-tab" data-v="${v}"`)}
       ${tab === 'pending' && items.length ? `<p class="list-sum when-idle">${items.length} ${plural(items.length, REQ_FORMS)} на ${money(sum(items, (r) => r.amount))}</p>` : '<div class="list-gap"></div>'}
       ${canBulk ? '<div class="bulk-head when-picking"><button class="link-btn bulk-all" data-act="bulk-all" data-bulk-all>Выбрать все</button><span data-bulk-count></span></div>' : ''}
@@ -2298,6 +2300,487 @@ function showDecisionError(e, r, kind) {
 }
 
 // ======================================================================
+// ЗАПРОСЫ КОНТРАГЕНТОВ (бот в WhatsApp; контракт 13.17–13.22, 1С 1.17.0)
+// ======================================================================
+// Контрагент пишет боту в WhatsApp. Ответы, которые требуют подтверждения бухгалтера, и задачи бухгалтеру приходят
+// сюда. Экран устроен как заявки: «Ждут» и «Решённые», карточка, решение с Idempotency-Key. Экран есть, только если
+// у организации counterparty_requests в /orgs — число (api.crCount не null); иначе входов на него нет.
+const CR_FORMS = ['запрос', 'запроса', 'запросов'];
+const FILE_FORMS = ['файл', 'файла', 'файлов'];
+const CR_NO_WHO = 'Контрагент не определён';
+const CR_STATUS = {
+  pending: ['Ждёт решения', 'st-wait'],
+  sent: ['Отправлено контрагенту', 'st-ok'],
+  rejected: ['Отклонено', 'st-neg'],
+  done: ['Задача закрыта', 'st-ok'],
+  failed: ['Не отправлено — 1С повторит', 'st-wait'],
+};
+const waits = (n) => (n % 10 === 1 && n % 100 !== 11 ? 'ждёт' : 'ждут');
+
+// Число ожидающих для значка на входе в экран. null — экрана у организации нет, вход не показываем.
+// Список ожидающих читается только там, где экран есть; ответ живёт 20 секунд — главная и «Заявки» его делят.
+async function crBadge(org) {
+  let base;
+  try {
+    base = await api.crCount(org);
+  } catch (e) {
+    return null;
+  }
+  if (base === null || base === undefined) return null;
+  try {
+    const l = await cached(`cr:${org}:pending`, 20000, () => api.crList(org, 'pending'));
+    return l.more ? Math.max(base, l.items.length) : l.items.length;
+  } catch (e) {
+    if (isSessionEnd(e)) throw e;
+    return base;
+  }
+}
+
+// Вход на экран с главной: карточка под заявками.
+function crHomeCard(n) {
+  if (n === null) return '';
+  return `<button class="cr-home ${n ? '' : 'is-empty'}" data-go="#/cr" data-cr-entry>
+      <span class="appr-count ${n ? '' : 'ok'}">${n || I.check}</span>
+      <span class="cr-home-body"><b>Запросы контрагентов${n ? `: ${n}` : ''}</b>
+      <span>${n ? `${n} ${plural(n, CR_FORMS)} ${waits(n)} решения` : 'Новых запросов нет'}</span></span>
+      <span class="appr-go">${I.chevR}</span>
+    </button>`;
+}
+
+function crRow(r, today) {
+  const tags = [
+    r.kind === 'unknown' ? `<span class="tag tag-warn" data-cr-unknown>${I.alert}Незнакомый номер</span>` : '',
+    r.kind === 'task' ? '<span class="tag tag-dir">Задача</span>' : '',
+    r.status === 'sent' ? '<span class="tag tag-pos">Отправлено</span>' : '',
+    r.status === 'rejected' ? '<span class="tag tag-neg">Отклонено</span>' : '',
+    r.status === 'done' ? '<span class="tag tag-pos">Закрыта</span>' : '',
+    r.status === 'failed' ? `<span class="tag tag-warn">${I.alert}Не отправлено</span>` : '',
+  ].join('');
+  const at = r.status === 'pending' ? r.createdAt : r.decidedAt || r.createdAt;
+  return `<div class="req-wrap" data-id="${H(r.id)}">
+    <button class="req-card cr-row" data-go="#/cr/${H(encodeURIComponent(r.id))}">
+      <span class="req-top"><b class="req-who">${H(r.counterparty || CR_NO_WHO)}</b></span>
+      <span class="req-purpose">${H(r.title)}</span>
+      ${tags ? `<span class="req-tags">${tags}</span>` : ''}
+      <span class="req-foot">
+        <span class="req-person cr-phone">${I.phone}${H(r.phone)}</span>
+        <span class="req-due">${I.clock}${stampAt(at, today)}</span>
+      </span>
+    </button>
+  </div>`;
+}
+
+views.cr = (params) => (params[0] ? crDetail(params[0]) : crListView());
+
+async function crListView() {
+  const org = api.orgId();
+  const tab = ui.crTab === 'done' ? 'done' : 'pending';
+  const head = topbar('Запросы контрагентов', '#/home');
+  let data;
+  try {
+    data = await api.crList(org, tab);
+    if (tab === 'pending') cache.set(`cr:${org}:pending`, { at: Date.now(), value: data });
+  } catch (e) {
+    // Экрана у организации нет (бот выключен, нет роли бухгалтера, база или сервер до 1.17.0) — спокойный текст.
+    if (e instanceof ApiError && ['forbidden', 'not_found', 'report_unavailable', 'not_implemented'].includes(e.code)) {
+      return {
+        key: 'cr', depth: 2, title: 'Запросы контрагентов',
+        html: `${head}<div class="scroll has-topbar"><div class="empty" data-cr-off><span class="empty-ic">${I.chat}</span><b>Раздел недоступен</b><span>Запросы контрагентов видят бухгалтеры и${NB}администраторы ФинПульса, когда в${NB}1С включён бот для контрагентов.</span><button class="btn btn-secondary" data-go="#/home">На главную</button></div></div>`,
+      };
+    }
+    throw e;
+  }
+  ui.crListIdx = histIdx(); // по этой записи истории «к списку» после решения возвращается назад, а не открывает второй список
+  const items = data.items || [];
+  const list = items.length
+    ? items.map((r) => crRow(r, data.today)).join('')
+    : tab === 'pending'
+      ? `<div class="empty"><span class="empty-ic ok">${I.check}</span><b>Запросов нет</b><span>Когда контрагент напишет боту в${NB}WhatsApp, запрос появится здесь и${NB}в${NB}уведомлениях</span></div>`
+      : `<div class="empty"><span class="empty-ic">${I.chat}</span><b>Пока пусто</b><span>Здесь будут запросы, решённые за${NB}последние 30${NB}дней</span></div>`;
+  return {
+    key: 'cr', depth: 2, title: 'Запросы контрагентов',
+    html: `${head}
+    <div class="scroll has-topbar">
+      ${segmented([{ v: 'pending', label: `Ждут${tab === 'pending' && items.length ? ` · ${items.length}` : ''}` }, { v: 'done', label: 'Решённые' }], tab, (v) => `data-act="cr-tab" data-v="${v}"`)}
+      <div class="list-gap"></div>
+      <div class="req-list" data-cr-list="${tab}">${list}</div>
+      ${data.more ? `<p class="foot-note">${I.info}<span>Показаны первые ${items.length} запросов</span></p>` : ''}
+    </div>`,
+  };
+}
+
+// К списку после решения: карточку открыли из списка — шаг назад по истории (список перечитается), иначе список
+// встаёт на место карточки. Так «Назад» из списка всегда уводит с него с первого нажатия.
+function crToList() {
+  ui.crTab = 'pending';
+  if (ui.crListIdx !== undefined && ui.crListIdx === histIdx() - 1) goBack('#/cr');
+  else replace('#/cr', 'pop');
+}
+
+actions['cr-tab'] = (t) => {
+  if ((ui.crTab || 'pending') === t.dataset.v) return;
+  ui.crTab = t.dataset.v;
+  nav.rerender();
+};
+
+const CR_EVENT = {
+  created: ['created', I.chat, 'Запрос получен'],
+  sent: ['approved', I.check, 'Отправлено контрагенту'],
+  rejected: ['rejected', I.x, 'Отклонено'],
+  done: ['approved', I.check, 'Задача закрыта'],
+  send_failed: ['failed', I.alert, 'Не удалось отправить — 1С повторит'],
+  delivered: ['approved', I.check, 'Доставлено'],
+  read: ['approved', I.check, 'Прочитано'],
+};
+
+function crEvent(h, today) {
+  const [cls, ic, label] = CR_EVENT[h.event] || ['created', I.clock, h.event || 'Событие'];
+  return `<li class="rt rt-${cls}" data-cr-event="${H(h.event || '')}">
+    <span class="rt-dot">${ic}</span>
+    <div class="rt-body">
+      <b>${label}</b>
+      <span class="rt-role">${[h.by ? H(h.by) : '', h.at ? stampAt(h.at, today) : ''].filter(Boolean).join(' · ')}</span>
+      ${h.comment ? `<span class="rt-comment">«${H(h.comment)}»</span>` : ''}
+    </div>
+  </li>`;
+}
+
+// Номер не из контактов контрагента (known_phone: false): отвечать можно, только если бухгалтер уверен в собеседнике.
+const crWarn = (r, compact = false) => (r.knownPhone ? '' : `<div class="over-note cr-warn ${compact ? 'compact' : ''}" data-cr-warn role="note">${I.alert}<div><b>Номер не из контактов контрагента</b><span>${!r.canDecide
+  ? 'Запрос пришёл с номера, которого нет в контактах контрагента в 1С.'
+  : r.kind === 'task'
+  ? 'Этого номера нет в 1С. Прежде чем отвечать, убедитесь, что пишет сотрудник контрагента.'
+  : 'Отправляйте ответ, только если уверены, что пишет сотрудник этой компании. Не уверены — отклоните запрос и свяжитесь с контрагентом сами.'}</span></div></div>`);
+
+async function crDetail(id) {
+  const org = api.orgId();
+  let r;
+  try {
+    // После решения карточка приходит в ответе на само действие — показываем её без второго запроса.
+    const fresh = ui.crFresh;
+    ui.crFresh = null;
+    r = fresh && fresh.id === id && fresh.org === org ? fresh.card : await api.crCard(org, id);
+  } catch (e) {
+    // Открыли по push, а запроса уже нет или он недоступен (404, 409, нет роли) — показываем список (13.22).
+    if (e instanceof ApiError && ['not_found', 'already_decided', 'forbidden'].includes(e.code)) {
+      if (e.code !== 'forbidden') setTimeout(() => toast('Запрос не найден — возможно, его уже решили', 'info'), 450);
+      ui.crTab = 'pending';
+      return { redirect: '#/cr' };
+    }
+    throw e;
+  }
+  ui.cr = r;
+  const today = r.today;
+  const task = r.kind === 'task';
+  const [stText, stCls] = CR_STATUS[r.status] || CR_STATUS.pending;
+  const files = r.files || [];
+  const answerHead = r.status === 'sent' ? 'Отправленный ответ' : r.status === 'rejected' ? 'Ответ бота (не отправлен)' : 'Ответ бота';
+  return {
+    key: `cr:${id}`, depth: 3, title: task ? 'Задача бухгалтеру' : 'Запрос контрагента',
+    html: `${topbar(task ? 'Задача бухгалтеру' : 'Запрос контрагента', '#/cr')}
+    <div class="scroll has-topbar ${r.canDecide ? 'has-actionbar' : ''}">
+      <section class="req-hero cr-hero">
+        <span class="status-chip ${stCls}" data-cr-status="${H(r.status)}">${r.status === 'pending' && task ? 'Задача ждёт вас' : stText}</span>
+        <div class="rh-who">${H(r.counterparty || CR_NO_WHO)}</div>
+        <h1 class="cr-title">${H(r.title)}</h1>
+      </section>
+
+      ${crWarn(r)}
+
+      <section class="card kv">
+        ${r.counterparty ? `<div class="kv-row"><span>Контрагент</span><b class="kv-two">${H(r.counterparty)}${r.bin ? `<small>БИН ${H(r.bin)}</small>` : ''}</b></div>` : ''}
+        ${r.contact ? `<div class="kv-row"><span>Контакт</span><b>${H(r.contact)}</b></div>` : ''}
+        <div class="kv-row"><span>Телефон</span><b data-cr-phone>${H(r.phone || '—')}</b></div>
+        ${r.createdAt ? `<div class="kv-row"><span>Получен</span><b>${stampAt(r.createdAt, today)}</b></div>` : ''}
+      </section>
+
+      ${r.question ? `<section class="card" data-cr-question>
+        <div class="card-head"><h2>${task ? 'Сообщение' : 'Сообщение контрагента'}</h2><span class="muted">WhatsApp</span></div>
+        <div class="quote"><span class="ava ava-person cr-ava">${I.chat}</span><div class="bubble">${H(r.question)}</div></div>
+      </section>` : ''}
+
+      ${!task || r.text ? `<section class="card" data-cr-answer>
+        <div class="card-head"><h2>${task ? 'Пояснение' : answerHead}</h2></div>
+        ${r.text ? `<div class="bubble cr-answer">${H(r.text)}</div>` : `<p class="cr-note">${I.info}<span>Ответ подготовит 1С при отправке</span></p>`}
+        ${r.canDecide && !task && r.text ? `<p class="cr-note">${I.info}<span>Перед отправкой текст можно поправить</span></p>` : ''}
+      </section>` : ''}
+
+      ${files.length ? `<section class="card" data-cr-files>
+        <div class="card-head"><h2>Вложения</h2></div>
+        ${files.map((f) => `<button class="attach" data-act="cr-file" data-file="${H(f.id)}">
+          <span class="pdf-ic">${/pdf/i.test(f.contentType) || /\.pdf$/i.test(f.name) ? 'PDF' : 'ФАЙЛ'}</span>
+          <span class="attach-name"><b>${H(f.name)}</b><small>${H(f.size || '')}</small></span>
+          ${I.chevR}
+        </button>`).join('')}
+        ${r.canDecide && r.intent === 'act' ? `<p class="cr-note">${I.info}<span>Акт перед отправкой заполняется заново — в${NB}просмотре уже актуальные данные</span></p>` : ''}
+      </section>` : ''}
+
+      <section class="card">
+        <div class="card-head"><h2>История</h2></div>
+        <ol class="route" data-cr-history>${(r.history || []).map((h) => crEvent(h, today)).join('')}</ol>
+      </section>
+    </div>
+    ${r.canDecide ? (task
+    ? `<div class="actionbar ab-1"><button class="btn btn-primary" data-act="cr-done">${I.check}Закрыть задачу</button></div>`
+    : `<div class="actionbar">
+      <button class="btn btn-ghost" data-act="cr-reject">Отклонить</button>
+      <button class="btn btn-primary" data-act="cr-send">${I.check}Отправить</button>
+    </div>`) : ''}`,
+  };
+}
+
+// Просмотр файла запроса (13.20): PDF формирует 1С в момент запроса. В демо — заглушка документа.
+actions['cr-file'] = async (t) => {
+  const r = ui.cr;
+  if (!r || t.classList.contains('busy')) return;
+  const f = (r.files || []).find((x) => x.id === t.dataset.file) || {};
+  t.classList.add('busy');
+  try {
+    const a = await api.crFile(api.orgId(), r.id, t.dataset.file);
+    const bar = `<div class="pdf-bar"><span class="pdf-ic sm">PDF</span><b>${H(f.name || a.name || 'Вложение')}</b><button class="tb-btn" data-act="sheet-close" aria-label="Закрыть">${I.x}</button></div>`;
+    if (a.kind === 'pdf') {
+      if (pdfUrl) URL.revokeObjectURL(pdfUrl);
+      pdfUrl = a.url;
+      openSheet(`${bar}
+        <iframe class="pdf-frame" src="${H(a.url)}" title="${H(f.name || 'Вложение')}"></iframe>
+        <a class="btn btn-secondary btn-block" href="${H(a.url)}" target="_blank" rel="noopener">${I.download}Открыть отдельно</a>`, { tall: true });
+      return;
+    }
+    openSheet(`${bar}
+      <div class="paper-scroll">
+        <div class="paper" data-cr-paper>
+          <div class="paper-stamp">ДЕМО</div>
+          <div class="paper-top">
+            <div><small>От</small><b>${H(a.from || '')}</b></div>
+            <div class="ta-r"><small>Кому</small><b>${H(a.to || '—')}</b></div>
+          </div>
+          <div class="paper-party"><small>${H(a.sub || '')}</small><b>${H(a.title || '')}</b></div>
+          <table class="paper-table"><tbody>${(a.rows || []).map(([k, v]) => `<tr><td>${H(k)}</td><td>${H(v)}</td></tr>`).join('')}</tbody></table>
+          ${a.note ? `<div class="paper-vat">${H(a.note)}</div>` : ''}
+          <div class="paper-sign"><span>Руководитель ____________</span><span>Бухгалтер ____________</span></div>
+        </div>
+      </div>
+      <p class="sheet-note">Это заглушка вложения. В рабочей версии здесь откроется PDF из&nbsp;1С.</p>`, { tall: true });
+  } catch (e) {
+    actionError(e);
+  } finally {
+    t.classList.remove('busy');
+  }
+};
+
+// ---------- решение по запросу: «отправлено» — только после ответа сервера ----------
+function crCommentWatch(wrap) {
+  const ta = wrap.querySelector('#reject-text');
+  ta.addEventListener('input', () => {
+    wrap.querySelector('#reject-err').hidden = true;
+    ta.classList.remove('invalid');
+    wrap.querySelectorAll('.chip').forEach((c) => c.classList.toggle('on', c.dataset.v === ta.value.trim()));
+  });
+}
+const crWho = (r) => [r.counterparty || CR_NO_WHO, r.phone].filter(Boolean).map(H).join(' · ');
+
+// «Отправить»: текст ответа можно поправить (до 4000 знаков). Не меняли — уходит text: null, 1С берёт свой.
+actions['cr-send'] = () => {
+  const r = ui.cr;
+  if (!r || !r.canDecide || r.kind === 'task') return;
+  const n = (r.files || []).length;
+  ui.crDecision = null;
+  openSheet(`<div class="sheet-title">Отправить ответ контрагенту?</div>
+    <p class="sheet-sub">${crWho(r)}</p>
+    ${crWarn(r, true)}
+    <textarea class="textarea cr-text" id="reject-text" rows="5" maxlength="4000" placeholder="${r.text ? 'Текст ответа' : 'Ответ подготовит 1С. Можно написать свой'}">${H(r.text)}</textarea>
+    <div class="field-err" id="reject-err" hidden>${I.alert}<span></span></div>
+    ${n ? `<p class="sheet-note cr-files-note">${I.file}<span>Вместе с${NB}ответом ${n === 1 ? 'уйдёт' : 'уйдут'} ${n}${NB}${plural(n, FILE_FORMS)}</span></p>` : ''}
+    <div class="sheet-actions">
+      <button class="btn btn-primary btn-block" data-act="cr-send-confirm" data-label="Отправить">Отправить</button>
+      <button class="btn btn-text btn-block" data-act="sheet-close">Отмена</button>
+    </div>`, { onMount: crCommentWatch });
+};
+
+function crFieldError(text) {
+  setSheetIdle();
+  const err = document.getElementById('reject-err');
+  const ta = document.getElementById('reject-text');
+  if (err) {
+    err.querySelector('span').textContent = text;
+    err.hidden = false;
+  }
+  if (ta) {
+    ta.classList.add('invalid');
+    ta.classList.remove('shake');
+    void ta.offsetWidth;
+    ta.classList.add('shake');
+    ta.focus();
+  }
+}
+
+actions['cr-send-confirm'] = (t) => {
+  const r = ui.cr;
+  if (!r) return;
+  const text = (document.getElementById('reject-text') || { value: '' }).value.trim();
+  if (!text && r.text) return crFieldError('Текст ответа пуст. Напишите ответ или отклоните запрос');
+  crSubmit('send', { text: text && text !== r.text.trim() ? text : null, comment: null }, t);
+};
+
+// «Отклонить»: комментарий обязателен, контрагенту он не уходит — бот отвечает вежливым отказом.
+actions['cr-reject'] = () => {
+  const r = ui.cr;
+  if (!r || !r.canDecide || r.kind === 'task') return;
+  ui.crDecision = null;
+  openSheet(`<div class="sheet-title">Отклонить запрос</div>
+    <p class="sheet-sub">Напишите причину${NB}— её увидят только коллеги. Контрагенту бот ответит, что документ в${NB}этот чат отправить нельзя и${NB}с${NB}ним свяжется бухгалтер.</p>
+    <div class="chips">${['Номер не из нашей базы', 'Свяжемся сами', 'Запрос не по адресу'].map((c) => `<button class="chip" data-act="reason" data-v="${c}">${c}</button>`).join('')}</div>
+    <textarea class="textarea" id="reject-text" rows="3" maxlength="1000" placeholder="Причина отказа"></textarea>
+    <div class="field-err" id="reject-err" hidden>${I.alert}<span></span></div>
+    <div class="sheet-actions">
+      <button class="btn btn-danger btn-block" data-act="cr-reject-confirm" data-label="Отклонить запрос">Отклонить запрос</button>
+      <button class="btn btn-text btn-block" data-act="sheet-close">Отмена</button>
+    </div>`, { onMount: crCommentWatch });
+};
+
+actions['cr-reject-confirm'] = (t) => {
+  const text = (document.getElementById('reject-text') || { value: '' }).value.trim();
+  if (!text) return crFieldError('Напишите причину отказа');
+  crSubmit('reject', { text: null, comment: text }, t);
+};
+
+// «Закрыть» — у задачи бухгалтеру: комментарий необязателен, в чат ничего не уходит.
+actions['cr-done'] = () => {
+  const r = ui.cr;
+  if (!r || !r.canDecide) return;
+  ui.crDecision = null;
+  openSheet(`<div class="sheet-title">Закрыть задачу?</div>
+    <p class="sheet-sub">${crWho(r)}. В${NB}чат контрагенту ничего не${NB}уйдёт.</p>
+    <textarea class="textarea" id="reject-text" rows="2" maxlength="1000" placeholder="Комментарий, если нужен"></textarea>
+    <div class="field-err" id="reject-err" hidden>${I.alert}<span></span></div>
+    <div class="sheet-actions">
+      <button class="btn btn-primary btn-block" data-act="cr-done-confirm" data-label="Закрыть задачу">Закрыть задачу</button>
+      <button class="btn btn-text btn-block" data-act="sheet-close">Отмена</button>
+    </div>`, { onMount: crCommentWatch });
+};
+
+actions['cr-done-confirm'] = (t) => {
+  const text = (document.getElementById('reject-text') || { value: '' }).value.trim();
+  crSubmit('done', { text: null, comment: text || null }, t);
+};
+
+actions['cr-retry'] = (t) => {
+  const d = ui.crDecision;
+  if (d) crSubmit(d.action, { text: d.text, comment: d.comment }, t);
+};
+
+actions['cr-to-list'] = async () => {
+  ui.crDecision = null;
+  invalidate();
+  await closeSheet();
+  crToList();
+};
+
+actions['cr-refresh'] = async () => {
+  ui.crDecision = null;
+  invalidate();
+  await closeSheet();
+  nav.rerender();
+};
+
+async function crSubmit(action, payload, btn) {
+  const r = ui.cr;
+  if (!r || ui.busy) return;
+  const org = api.orgId();
+  // Ключ — на одно нажатие. Обрыв связи, 503 и 504 его сохраняют («Повторить» идёт с тем же), окончательный отказ
+  // (409, 422) снимает — следующее нажатие уйдёт с новым.
+  if (!ui.crDecision || ui.crDecision.id !== r.id || ui.crDecision.action !== action) ui.crDecision = { id: r.id, action, key: uuid() };
+  Object.assign(ui.crDecision, payload);
+  setBusy(btn, 'Отправляется…');
+  let res;
+  try {
+    res = await api.crDecide(org, r.id, { action, text: payload.text, comment: payload.comment, idempotencyKey: ui.crDecision.key });
+  } catch (e) {
+    ui.busy = false;
+    if (isSessionEnd(e)) {
+      await closeSheet(true);
+      onUnauthorized(e);
+      return;
+    }
+    if (!keepsKey(e)) {
+      if ((e.details || {}).contractCode === 'idempotency_key_reused') ui.crDecision.key = uuid();
+      else ui.crDecision = null;
+    }
+    crError(e, r, action);
+    return;
+  }
+  ui.busy = false;
+  ui.crDecision = null;
+  invalidate();
+  await closeSheet();
+  const card = res && res.card;
+  // Подтверждено, но WhatsApp сообщение не принял: 1С повторит отправку сама. Остаёмся в карточке из ответа.
+  if (action === 'send' && card && card.status === 'failed') {
+    ui.crFresh = { id: r.id, org, card };
+    setTimeout(() => toast('Подтверждено, но отправить пока не удалось. 1С повторит отправку сама', 'info'), 60);
+    nav.rerender();
+    return;
+  }
+  if (action === 'send') await success({ kind: 'approved', title: 'Отправлено контрагенту', text: `${H(r.counterparty || 'Контрагент')} получит ответ в${NB}WhatsApp` });
+  else if (action === 'reject') await success({ kind: 'rejected', title: 'Запрос отклонён', text: 'Контрагенту бот ответил, что с ним свяжется бухгалтер' });
+  else await success({ kind: 'approved', title: 'Задача закрыта', text: 'В чат контрагенту ничего не отправлено' });
+  crToList();
+}
+
+function crError(e, r, action) {
+  const c = e instanceof ApiError ? e.code : 'server_error';
+  const ta = document.getElementById('reject-text');
+  if (c === 'comment_required' && ta) return crFieldError('Напишите причину — без комментария отклонить нельзя');
+  if (c === 'validation_error' && ta) return crFieldError(action === 'send' ? 'Ответ слишком длинный — не больше 4000 символов' : 'Комментарий слишком длинный — не больше 1000 символов');
+  const TO_LIST = '<button class="btn btn-primary btn-block" data-act="cr-to-list">К списку запросов</button>';
+  let icon = I.alert;
+  let title;
+  let text;
+  let buttons;
+  if (c === 'already_decided') {
+    // Запрос видят все бухгалтеры, решает первый (13.17): кто и когда — в details.
+    const det = e.details || {};
+    const what = { sent: 'Ответ уже отправлен', rejected: 'Запрос уже отклонён', done: 'Задача уже закрыта' }[det.status] || 'Запрос уже решён';
+    icon = I.info;
+    title = 'Запрос уже решён';
+    text = `${what}${det.by ? `: ${H(det.by)}` : ''}${det.at ? `, ${stampAt(det.at, r.today)}` : ''}. Ваше решение не отправлено.`;
+    buttons = TO_LIST;
+  } else if (c === 'action_failed') {
+    title = 'Действие не выполнено';
+    text = `${H(sentence(e.message || 'Причина не указана'))} Запрос остался без изменений.`;
+    buttons = `<button class="btn btn-primary btn-block" data-act="cr-refresh">Обновить запрос</button>
+      <button class="btn btn-text btn-block" data-act="sheet-close">Закрыть</button>`;
+  } else if (c === 'not_found') {
+    icon = I.info;
+    title = 'Запрос не найден';
+    text = 'Возможно, его уже решили или удалили. Ваше решение не отправлено.';
+    buttons = TO_LIST;
+  } else if (c === 'forbidden') {
+    icon = I.shield;
+    title = 'Нет доступа к запросу';
+    text = 'Запросы контрагентов решают бухгалтеры и администраторы ФинПульса. Ваше решение не отправлено.';
+    buttons = TO_LIST;
+  } else {
+    const map = {
+      network: ['Нет связи', 'Решение не отправлено. Проверьте интернет и повторите.'],
+      timeout: ['Сервер не ответил', 'Неизвестно, дошло ли решение. Повторите — дважды оно не применится.'],
+      upstream_unavailable: ['1С сейчас недоступна', 'Решение не применено. Повторите через минуту.'],
+      server_unavailable: ['Сервер недоступен', 'Решение не отправлено. Повторите через минуту.'],
+    };
+    [title, text] = map[c] || ['Не удалось отправить решение', 'Повторите — дважды оно не применится.'];
+    buttons = `<button class="btn btn-primary btn-block" data-act="cr-retry">${I.refresh}Повторить</button>
+      <button class="btn btn-text btn-block" data-act="sheet-close">Отмена</button>`;
+  }
+  ui.busy = false;
+  setSheet(`<div class="decision-state" data-state="${H(c)}" role="alert">
+      <span class="ds-ic ${icon === I.info ? 'info' : ''}">${icon}</span>
+      <div class="sheet-title">${title}</div>
+      <p class="sheet-sub">${text}</p>
+    </div>
+    <div class="sheet-actions">${buttons}</div>`);
+}
+
+// ======================================================================
 // ОТЧЁТЫ
 // ======================================================================
 function niceMax(v) {
@@ -2904,6 +3387,7 @@ actions['dds-sel'] = (t) => {
 const N_IC = {
   payment: ['in', I.arrowIn],
   request: ['req', I.requests],
+  cr: ['req', I.chat], // запрос контрагента (13.22)
   gap: ['gap', I.alert],
   summary: ['sum', I.sun],
   debt: ['debt', I.trendDown],
@@ -2917,6 +3401,7 @@ function linkToHash(link) {
   const [kind, val] = String(link).split(':');
   if (kind === 'calendar') return `#/calendar/${val}`;
   if (kind === 'request') return `#/requests/${val}`;
+  if (kind === 'cr') return val ? `#/cr/${encodeURIComponent(val)}` : '#/cr';
   if (kind === 'reports') return `#/reports/${val}`;
   if (kind === 'requests') return '#/requests';
   return null;

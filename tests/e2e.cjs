@@ -579,6 +579,143 @@ async function runFlow(browser, name, opts, isPhone) {
   await settle(page, 600);
   ok((await tabBadge(page)) === '3', '«Сбросить демо» возвращает 3 заявки');
 
+  // --- запросы контрагентов (бот в WhatsApp): экран есть у «Альфа Логистик» ---
+  const S = '.screen:not(.leaving)';
+  const crRows = () => page.locator(`${S} [data-cr-list] .req-card`).count();
+  await tab(page, '#/home');
+  await settle(page);
+  await page.waitForFunction(() => !document.querySelector('.toast.show'), null, { timeout: 6000 });
+  const crHome = await page.locator(`${S} .cr-home`).innerText().then(norm);
+  ok(crHome.includes('Запросы контрагентов: 5') && crHome.includes('5 запросов ждут решения'), 'демо: на главной — «Запросы контрагентов: 5»');
+  await scrollTo(page, '.alert-card, .calm-card');
+  await noHScroll(page, 'Главная, запросы контрагентов');
+  if (isPhone) await shot(page, '44-glavnaya-zaprosy-kontragentov');
+  await tab(page, '#/requests');
+  await settle(page);
+  ok((await page.locator(`${S} .cr-entry`).innerText().then(norm)).replace(/\s+/g, ' ').trim() === 'Запросы контрагентов 5' && (await tabBadge(page)) === '3', 'демо: вход из «Заявок» со значком 5; значок вкладки — только заявки');
+  if (isPhone) await shot(page, '45-zayavki-vhod-v-zaprosy');
+  await tap(page, '.cr-entry');
+  await settle(page);
+  ok((await screenKey(page)) === '#/cr' && (await crRows()) === 5, 'демо: «Ждут» — пять запросов');
+  const crTexts = await page.locator(`${S} [data-cr-list] .req-card`).evaluateAll((els) => els.map((e) => e.innerText.replace(/ /g, ' ').replace(/\s+/g, ' ').trim()));
+  ok(crTexts[0].includes('ТОО «Караван Транс»') && crTexts[0].includes('Акт сверки') && crTexts[0].includes('+7 701 ***-**-67'), 'демо: первым — самый старый запрос; номер частично скрыт');
+  ok(crTexts.filter((t) => t.includes('Незнакомый номер')).length === 1 && crTexts.filter((t) => t.includes('Задача')).length === 2 && crTexts[4].includes('Контрагент не определён'), 'демо: один незнакомый номер и две задачи, одна — без контрагента');
+  await noHScroll(page, 'Запросы контрагентов');
+  if (isPhone) await shot(page, '46-zaprosy-kontragentov');
+
+  // ответ с актом сверки: просмотр файла и «Отправить»
+  await tap(page, '.req-wrap[data-id="c1"] .req-card');
+  await settle(page);
+  ok((await screenKey(page)) === '#/cr/c1' && await page.locator(`${S} [data-cr-warn]`).count() === 0 && await page.locator(`${S} [data-act="cr-send"]`).isVisible(), 'демо: карточка ответа — «Отправить» и «Отклонить», предупреждения нет');
+  await noHScroll(page, 'Запрос контрагента');
+  if (isPhone) await shot(page, '47-zapros-kartochka');
+  await scrollTo(page, '[data-cr-answer]');
+  if (isPhone) await shot(page, '48-zapros-otvet-i-vlozhenie');
+  await tap(page, '[data-act="cr-file"]');
+  await settle(page, 500);
+  ok(await page.locator('.sheet [data-cr-paper]').isVisible() && (await page.locator('.sheet [data-cr-paper]').innerText().then(norm)).includes('Акт сверки взаимных расчётов'), 'демо: вложение открывается заглушкой акта сверки');
+  if (isPhone) await shot(page, '49-zapros-akt-sverki');
+  await tap(page, '.pdf-bar [data-act="sheet-close"]');
+  await settle(page, 350);
+  await tap(page, '[data-act="cr-send"]');
+  await settle(page, 450);
+  ok((await page.locator('.sheet #reject-text').inputValue()).includes('во вложении'), 'демо: в шторке «Отправить» — текст ответа, его можно поправить');
+  await noHScroll(page, 'Запрос, отправить');
+  if (isPhone) await shot(page, '50-zapros-otpravit');
+  await tap(page, '[data-act="cr-send-confirm"]');
+  await page.waitForSelector('.done-overlay.show');
+  await settle(page, 750);
+  ok((await page.locator('.done-title').innerText().then(norm)) === 'Отправлено контрагенту', 'демо: «Отправлено контрагенту»');
+  if (isPhone) await shot(page, '51-zapros-otpravleno');
+  await page.waitForFunction(() => location.hash === '#/cr');
+  await settle(page, 1300);
+  ok((await crRows()) === 4, 'демо: запрос ушёл из «Ждут»');
+
+  // незнакомый номер: предупреждение и «Отклонить» с обязательным комментарием
+  await tap(page, '.req-wrap[data-id="c3"] .req-card');
+  await settle(page);
+  ok((await page.locator(`${S} [data-cr-warn]`).innerText().then(norm)).includes('Номер не из контактов контрагента'), 'демо: незнакомый номер — предупреждение в карточке');
+  if (isPhone) await shot(page, '52-zapros-neznakomyy-nomer');
+  await tap(page, '[data-act="cr-reject"]');
+  await settle(page, 450);
+  await tap(page, '[data-act="cr-reject-confirm"]');
+  await settle(page, 500);
+  ok(await page.locator('#reject-err').isVisible(), 'демо: без комментария отклонить нельзя');
+  await tap(page, '.chip[data-v="Номер не из нашей базы"]');
+  await settle(page, 300);
+  await noHScroll(page, 'Запрос, отклонить');
+  if (isPhone) await shot(page, '53-zapros-otklonit');
+  await tap(page, '[data-act="cr-reject-confirm"]');
+  await page.waitForSelector('.done-overlay.show');
+  ok((await page.locator('.done-title').innerText().then(norm)) === 'Запрос отклонён', 'демо: «Запрос отклонён»');
+  await page.waitForFunction(() => location.hash === '#/cr');
+  await settle(page, 1300);
+
+  // задача бухгалтеру: только «Закрыть»
+  await tap(page, '.req-wrap[data-id="c4"] .req-card');
+  await settle(page);
+  ok(await page.locator(`${S} [data-act="cr-done"]`).isVisible() && await page.locator(`${S} [data-act="cr-send"]`).count() === 0, 'демо: у задачи — только «Закрыть задачу»');
+  await noHScroll(page, 'Задача бухгалтеру');
+  if (isPhone) await shot(page, '54-zapros-zadacha');
+  await tap(page, '[data-act="cr-done"]');
+  await settle(page, 450);
+  await tap(page, '[data-act="cr-done-confirm"]');
+  await page.waitForSelector('.done-overlay.show');
+  ok((await page.locator('.done-title').innerText().then(norm)) === 'Задача закрыта', 'демо: «Задача закрыта»');
+  await page.waitForFunction(() => location.hash === '#/cr');
+  await settle(page, 1300);
+  ok((await crRows()) === 2, 'демо: в «Ждут» осталось два запроса');
+
+  // «Решённые» и история
+  await tap(page, '[data-act="cr-tab"][data-v="done"]');
+  await settle(page, 400);
+  ok((await crRows()) === 5, 'демо: в «Решённых» пять запросов — три своих и два прежних');
+  if (isPhone) await shot(page, '55-zaprosy-reshennye');
+  await tap(page, '.req-wrap[data-id="c6"] .req-card');
+  await settle(page);
+  const crHist = await page.locator(`${S} [data-cr-history] .rt`).evaluateAll((els) => els.map((e) => e.innerText.replace(/ /g, ' ').replace(/\s+/g, ' ').trim()));
+  ok(crHist.length === 4 && crHist[1].includes('Отправлено контрагенту') && crHist[1].includes('Динара Оспанова') && crHist[3].includes('Прочитано') && await page.locator(`${S} .actionbar`).count() === 0, 'демо: решённый запрос — история с тем, кто отправил, «Доставлено» и «Прочитано»; кнопок нет');
+  await scrollTo(page, '[data-cr-history]');
+  if (isPhone) await shot(page, '56-zapros-istoriya');
+  await tap(page, '[data-back]');
+  await settle(page);
+  await tap(page, '[data-back]');
+  await settle(page);
+  ok((await screenKey(page)) !== '#/cr', 'демо: «Назад» из списка запросов уводит с него с первого нажатия');
+  await tab(page, '#/home');
+  await settle(page);
+  ok((await page.locator(`${S} .cr-home`).innerText().then(norm)).includes('Запросы контрагентов: 2'), 'демо: на главной число запросов уменьшилось до 2');
+
+  // строка в уведомлениях ведёт в карточку
+  await tap(page, '.icon-btn[data-go="#/notifications"]');
+  await settle(page);
+  await tap(page, '.notif:has-text("Запрос контрагента")');
+  await settle(page);
+  ok((await screenKey(page)) === '#/cr/c3' && (await page.locator(`${S} .status-chip`).innerText().then(norm)) === 'Отклонено', 'демо: уведомление «Запрос контрагента» открывает карточку');
+
+  // у организации без бота экрана нет
+  await page.evaluate(() => { location.hash = '#/profile'; });
+  await settle(page);
+  await tap(page, '[data-act="switch-org"][data-id="sever"]');
+  await settle(page, 300);
+  await tab(page, '#/home');
+  await settle(page);
+  ok(await page.locator(`${S} [data-cr-entry]`).count() === 0, 'демо: у «Север Трейд» входа на экран запросов нет');
+  await tab(page, '#/requests');
+  await settle(page);
+  ok(await page.locator(`${S} [data-cr-entry]`).count() === 0, 'демо: и во вкладке «Заявки» у «Север Трейд» его нет');
+  await page.evaluate(() => { location.hash = '#/profile'; });
+  await settle(page);
+  await tap(page, '[data-act="switch-org"][data-id="alfa"]');
+  await settle(page, 300);
+  await tap(page, '[data-act="reset-demo"]');
+  await settle(page, 400);
+  await tap(page, '[data-act="reset-confirm"]');
+  await settle(page, 600);
+  await tab(page, '#/home');
+  await settle(page);
+  ok((await page.locator(`${S} .cr-home`).innerText().then(norm)).includes('Запросы контрагентов: 5'), 'демо: «Сбросить демо» возвращает пять запросов');
+
   // --- обновление страницы на любом экране ---
   for (const h of ['#/home', '#/calendar/2026-11-12', '#/requests', '#/requests/r101', '#/reports/plan', '#/notifications', '#/profile', '#/orgs']) {
     const resp = await page.goto(BASE + h);

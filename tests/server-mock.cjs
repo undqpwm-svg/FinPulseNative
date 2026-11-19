@@ -120,6 +120,28 @@ const MULTI = card({
   ],
 });
 
+// Запросы контрагентов (контракт 13.17–13.21): карточки для имитатора. Данные вымышленные.
+function crCard(over = {}) {
+  return {
+    updated_at: T(TODAY, '10:15'), id: 'cr_1', kind: 'answer', status: 'pending', intent: 'act', title: 'Акт сверки за 01.01.2026–11.11.2026',
+    counterparty: { name: 'ТОО «Тест Контрагент»', bin: '123456789012' }, contact: { name: 'Тест Контакт' },
+    phone_masked: '+7 701 ***-**-67', known_phone: true,
+    question: 'Скиньте акт сверки за этот год', text: 'Акт сверки с ТОО «Тест Контрагент» за 01.01.2026–11.11.2026 — во вложении.',
+    files: [{ id: 'cf_1', name: 'Акт сверки Тест Контрагент.pdf', content_type: 'application/pdf', size: 48211 }],
+    created_at: T(TODAY, '09:12'), decision: null,
+    history: [{ at: T(TODAY, '09:12'), event: 'created', by: null, comment: null }],
+    ...over,
+  };
+}
+const crItems = () => [
+  crCard(),
+  crCard({ id: 'cr_2', kind: 'unknown', intent: 'balance', title: 'Сальдо на 11.11.2026', counterparty: { name: 'ТОО «Тест Незнакомый»', bin: '210987654321' }, contact: null, phone_masked: '+7 705 ***-**-12', known_phone: false, question: 'Это бухгалтерия, сколько мы должны?', text: 'Задолженность на 11.11.2026 — 640 000 ₸.', files: [], created_at: T(TODAY, '09:40'), history: [{ at: T(TODAY, '09:40'), event: 'created', by: null, comment: null }] }),
+  crCard({ id: 'cr_3', kind: 'task', intent: null, title: 'Новые реквизиты', counterparty: null, contact: null, phone_masked: '+7 702 ***-**-88', known_phone: false, question: 'У нас новый счёт, письмо во вложении', text: null, files: [], created_at: T(TODAY, '10:02'), history: [{ at: T(TODAY, '10:02'), event: 'created', by: null, comment: null }] }),
+  crCard({ id: 'cr_4', status: 'sent', intent: 'requisites', title: 'Реквизиты компании', created_at: T(day(-1), '15:20'), decided_at: T(day(-1), '15:34'), files: [],
+    decision: { action: 'sent', by: { name: 'Тест Коллега', initials: 'ТК' }, at: T(day(-1), '15:34'), comment: null },
+    history: [{ at: T(day(-1), '15:20'), event: 'created', by: null, comment: null }, { at: T(day(-1), '15:34'), event: 'sent', by: { name: 'Тест Коллега', initials: 'ТК' }, comment: null }, { at: T(day(-1), '15:34'), event: 'delivered', by: null, comment: null }, { at: T(day(-1), '15:41'), event: 'read', by: null, comment: null }] }),
+];
+
 const listItem = (c) => ({ id: c.id, number: c.number, status: c.status, my_action: c.my_action, counterparty: c.counterparty, amount: c.amount, currency: c.currency, amount_kzt: c.amount_kzt, article: c.article, purpose: c.purpose, pay_by: c.pay_by, created_at: c.created_at, initiator: { name: 'Тест Инициатор', initials: 'ТИ' }, over_limit: Math.max(0, ...(c.budgets || []).map((x) => x.over_by || 0)), my_decision_at: c.my_decision_at });
 
 function summary() {
@@ -324,6 +346,53 @@ async function mockApi(page, ctl) {
       }
       if (how === 'abort') return route.abort('failed');
       return done({});
+    }
+    // ---- запросы контрагентов (13.17–13.21): st.cr = { items: [карточки], plan: [исходы решений] } ----
+    // Нет st.cr — экрана у пользователя нет (403). Исходы POST: ok, send-failed (200, status failed), decided (409),
+    // wrong (422 action_failed), long (422 validation_error), 503, 504-applied (применено, ответ потерян), abort.
+    if (/^\/orgs\/org_test\/counterparty-requests(\/|$)/.test(p)) {
+      const C = st.cr;
+      if (!C) return err(403, 'forbidden', 'Раздел недоступен');
+      C.log = C.log || [];
+      C.applied = C.applied || new Set();
+      const [crId, sub, fileId] = p.split('/').slice(4);
+      if (!crId) {
+        const done = url.searchParams.get('tab') === 'done';
+        const rows = C.items.filter((c) => (c.status !== 'pending') === done);
+        return json(200, { updated_at: T(TODAY, '10:15'), items: rows.map((c) => ({ id: c.id, kind: c.kind, status: c.status, intent: c.intent, title: c.title, counterparty: c.counterparty ? c.counterparty.name : null, phone_masked: c.phone_masked, created_at: c.created_at, decided_at: c.decided_at || null })), next_cursor: null });
+      }
+      const c = C.items.find((x) => x.id === crId);
+      if (!c) return err(404, 'not_found', 'Запрос не найден');
+      if (!sub) return json(200, c);
+      if (sub === 'files') {
+        if (!c.files.some((f) => f.id === fileId)) return err(404, 'not_found', 'Файл не найден');
+        return route.fulfill({ status: 200, headers: { ...cors, 'Content-Type': 'application/pdf', 'Content-Disposition': "inline; filename*=UTF-8''akt.pdf" }, body: Buffer.from('%PDF-1.4\n% имитатор\n') });
+      }
+      const key = call.headers['idempotency-key'];
+      const how = (C.plan || []).shift() || 'ok';
+      C.log.push({ id: crId, action: sub, key, body, how });
+      const apply = (status) => {
+        const at = T(TODAY, '10:20');
+        const by = { name: 'Тест Руководитель', initials: 'ТР' };
+        c.status = status;
+        c.decided_at = at;
+        if (sub === 'send' && body && body.text) c.text = body.text;
+        c.decision = { action: status === 'failed' ? 'sent' : status, by, at, comment: (body && body.comment) || null };
+        c.history = [...c.history, { at, event: status === 'failed' ? 'send_failed' : status, by, comment: (body && body.comment) || null }];
+        C.applied.add(key);
+      };
+      if (C.applied.has(key)) return json(200, { ...c, replayed: true }, { 'Idempotent-Replayed': 'true' });
+      if (how === 'decided') return err(409, 'already_decided', 'Запрос уже решил Тест Коллега', { decided_by: 'Тест Коллега', decided_at: T(TODAY, '10:05'), decision: 'sent' });
+      if (how === 'wrong') return err(422, 'action_failed', 'Контрагент помечен на удаление');
+      if (how === 'long') return err(422, 'validation_error', 'Проверьте поля запроса.', { fields: { text: 'Не длиннее 4000 символов' } });
+      if (how === '503') return err(503, 'source_unavailable', 'Нет связи с учётом компании', undefined, { 'Retry-After': '30' });
+      if (how === 'abort') return route.abort('failed');
+      if (c.status !== 'pending') return err(409, 'already_decided', 'Запрос уже решён', { decided_by: c.decision.by.name, decided_at: c.decision.at, decision: c.decision.action });
+      if (sub === 'reject' && !(body && String(body.comment || '').trim())) return err(422, 'comment_required', 'Укажите причину');
+      if ((sub === 'done') !== (c.kind === 'task')) return err(422, 'action_failed', 'Действие не подходит к запросу');
+      apply(how === 'send-failed' ? 'failed' : { send: 'sent', reject: 'rejected', done: 'done' }[sub]);
+      if (how === '504-applied') return err(504, 'source_timeout', 'Учёт не успел ответить');
+      return json(200, c);
     }
     // ---- доп. согласование директором (6.8, 1С 1.16.8): st.dir = { viewer: 'approver' | 'director', plan: [исходы] } ----
     // approver — пользователь последний в маршруте и может отправить заявку директору; director — он сам директор и
@@ -2373,6 +2442,256 @@ const PUSH_STUB = () => {
       await ctx.close();
     }
 
+    // ---------- 4б. запросы контрагентов ----------
+    console.log('\n▶ «Запросы контрагентов»: вход на экран только там, где он есть (counterparty_requests в /orgs)');
+    {
+      const { ctx, page, errors, ctl } = await newCtx();
+      await page.goto(BASE);
+      await settle(page, 800);
+      await login(page, ctl);
+      const scr = '.screen:not(.leaving)';
+      ok(await page.locator(`${scr} [data-cr-entry]`).count() === 0, 'поля нет (база до 1.17.0, бот выключен, нет роли): на главной входа нет');
+      await page.evaluate(() => { location.hash = '#/requests'; });
+      await settle(page, 800);
+      ok(await page.locator(`${scr} [data-cr-entry]`).count() === 0, 'поля нет: во вкладке «Заявки» входа нет');
+      ok(!ctl.calls.some((c) => c.path.includes('counterparty-requests')), 'поля нет: запросов к …/counterparty-requests приложение не делает');
+      await page.evaluate(() => { location.hash = '#/cr'; });
+      await settle(page, 900);
+      ok(await page.locator(`${scr} [data-cr-off]`).count() === 1 && norm(await page.locator(`${scr} [data-cr-off]`).innerText()).includes('Раздел недоступен'), 'прямой адрес без доступа (403) — «Раздел недоступен», без ошибки');
+      noErrors(errors);
+      await ctx.close();
+    }
+    {
+      // counterparty_requests: null — то же, что поля нет
+      const { ctx, page, errors, ctl } = await newCtx(devices['iPhone 13'], { orgs: [{ ...ORG, counterparty_requests: null }] });
+      await page.goto(BASE);
+      await settle(page, 800);
+      await login(page, ctl);
+      ok(await page.locator('.screen:not(.leaving) [data-cr-entry]').count() === 0 && !ctl.calls.some((c) => c.path.includes('counterparty-requests')), 'counterparty_requests: null — входа нет, запросов нет');
+      noErrors(errors);
+      await ctx.close();
+    }
+
+    console.log('\n▶ «Запросы контрагентов»: список, карточка, файл, «Отправить», «Отклонить», «Закрыть» (контракт, 13.17–13.21)');
+    {
+      const { ctx, page, errors, ctl } = await newCtx(devices['iPhone 13'], { orgs: [{ ...ORG, counterparty_requests: 3 }], cr: { items: crItems(), plan: [] } });
+      await page.goto(BASE);
+      await settle(page, 800);
+      await login(page, ctl);
+      const scr = '.screen:not(.leaving)';
+      const C = ctl.state.cr;
+      const lists = (tab) => ctl.calls.filter((c) => c.method === 'GET' && c.path === '/orgs/org_test/counterparty-requests' && c.query.tab === tab).length;
+      const noToast = () => page.waitForFunction(() => !document.querySelector('.toast.show'), null, { timeout: 8000 });
+      const openCard = async (id) => {
+        await page.evaluate((h) => { location.hash = h; }, `#/cr/${id}`);
+        await settle(page, 900);
+      };
+      // вход с главной и из «Заявок», значок — число ожидающих
+      const home = norm(await page.locator(`${scr} .cr-home`).innerText());
+      ok(home.includes('Запросы контрагентов: 3') && home.includes('3 запроса ждут решения'), 'главная: карточка «Запросы контрагентов: 3»');
+      ok(lists('pending') === 1, 'число ожидающих — одним запросом списка tab=pending');
+      await shot(page, '36-glavnaya-zaprosy-kontragentov');
+      await page.evaluate(() => { location.hash = '#/requests'; });
+      await settle(page, 800);
+      ok(norm(await page.locator(`${scr} .cr-entry`).innerText()).replace(/\s+/g, ' ').trim() === 'Запросы контрагентов 3' && lists('pending') === 1, '«Заявки»: строка входа со значком 3, список повторно не читается');
+      ok((await page.evaluate(() => document.querySelector('.tab-badge')?.textContent || '0')) === '1', 'значок вкладки «Заявки» — по-прежнему только заявки на согласование');
+      await page.locator(`${scr} .cr-entry`).click();
+      await settle(page, 900);
+      // список
+      ok((await page.evaluate(() => location.hash)) === '#/cr' && await page.locator(`${scr} [data-cr-list="pending"] .req-card`).count() === 3, 'вкладка «Ждут»: три запроса');
+      const rows = await page.locator(`${scr} .req-card`).evaluateAll((els) => els.map((e) => e.innerText.replace(/ /g, ' ').replace(/\s+/g, ' ').trim()));
+      ok(rows[0].includes('ТОО «Тест Контрагент»') && rows[0].includes('Акт сверки за 01.01.2026–11.11.2026') && rows[0].includes('+7 701 ***-**-67') && rows[0].includes('сегодня, 09:12'), 'строка: контрагент, что просит, номер как пришёл (частично скрыт), когда');
+      ok(rows[1].includes('Незнакомый номер') && rows[2].includes('Задача') && rows[2].includes('Контрагент не определён') && rows[2].includes('Новые реквизиты'), 'метки «Незнакомый номер» и «Задача»; задача без контрагента');
+      ok(norm(await page.locator(`${scr} .seg-btn.on`).innerText()).trim() === 'Ждут · 3', 'на вкладке — «Ждут · 3»');
+      await shot(page, '37-zaprosy-kontragentov-spisok');
+      await page.locator(`${scr} [data-act="cr-tab"][data-v="done"]`).click();
+      await settle(page, 800);
+      const doneRow = norm(await page.locator(`${scr} [data-cr-list="done"] .req-card`).innerText());
+      ok(lists('done') === 1 && await page.locator(`${scr} .req-card`).count() === 1 && doneRow.includes('Отправлено') && doneRow.includes('вчера, 15:34'), '«Решённые»: tab=done, статус и время решения');
+      await page.locator(`${scr} [data-cr-list="done"] .req-card`).click();
+      await settle(page, 900);
+      const hist = await page.locator(`${scr} [data-cr-history] .rt`).evaluateAll((els) => els.map((e) => e.innerText.replace(/ /g, ' ').replace(/\s+/g, ' ').trim()));
+      ok(hist.length === 4 && hist[1].includes('Отправлено контрагенту') && hist[1].includes('Тест Коллега') && hist[2].includes('Доставлено') && hist[3].includes('Прочитано'), 'решённый запрос: история — кто отправил, «Доставлено», «Прочитано»');
+      ok(await page.locator(`${scr} .actionbar`).count() === 0 && norm(await page.locator(`${scr} .status-chip`).innerText()) === 'Отправлено контрагенту', 'у решённого запроса кнопок нет');
+      await page.locator(`${scr} [data-back]`).click();
+      await settle(page, 700);
+      await page.locator(`${scr} [data-act="cr-tab"][data-v="pending"]`).click();
+      await settle(page, 700);
+
+      // карточка ответа
+      await page.locator(`${scr} .req-wrap[data-id="cr_1"] .req-card`).click();
+      await settle(page, 900);
+      const card = norm(await page.locator(scr).innerText());
+      ok((await page.evaluate(() => location.hash)) === '#/cr/cr_1' && card.includes('ТОО «Тест Контрагент»') && card.includes('БИН 123456789012') && card.includes('Тест Контакт'), 'карточка: контрагент, БИН, контакт');
+      ok(norm(await page.locator(`${scr} [data-cr-phone]`).innerText()) === '+7 701 ***-**-67', 'телефон показан так, как пришёл');
+      ok(norm(await page.locator(`${scr} [data-cr-question]`).innerText()).includes('Скиньте акт сверки за этот год') && norm(await page.locator(`${scr} [data-cr-answer]`).innerText()).includes('— во вложении.'), 'карточка: вопрос контрагента и ответ бота');
+      ok(await page.locator(`${scr} [data-cr-warn]`).count() === 0, 'known_phone: true — предупреждения нет');
+      ok(await page.locator(`${scr} [data-act="cr-send"]`).isVisible() && await page.locator(`${scr} [data-act="cr-reject"]`).isVisible() && await page.locator(`${scr} [data-act="cr-done"]`).count() === 0, 'kind: answer — «Отправить» и «Отклонить»');
+      await shot(page, '38-zapros-kartochka');
+      // файл
+      await page.locator(`${scr} [data-act="cr-file"]`).click();
+      await page.waitForSelector('.sheet .pdf-frame', { timeout: 6000 });
+      const fileCall = ctl.calls.find((c) => c.path === '/orgs/org_test/counterparty-requests/cr_1/files/cf_1');
+      ok(fileCall && fileCall.method === 'GET' && /^Bearer /.test(fileCall.headers.authorization || '') && (await page.locator('.sheet .pdf-frame').getAttribute('src')).startsWith('blob:'), 'файл: GET …/files/{id} с авторизацией, просмотр PDF в шторке');
+      await page.locator('.pdf-bar [data-act="sheet-close"]').click();
+      await settle(page, 400);
+
+      // «Отправить»: пустой текст → ошибка у поля; 503 → обрыв → 200 с одним ключом; текст не меняли — text: null
+      await page.locator(`${scr} [data-act="cr-send"]`).click();
+      await settle(page, 450);
+      const sheet = norm(await page.locator('.sheet').innerText());
+      ok(sheet.includes('Отправить ответ контрагенту?') && sheet.includes('+7 701 ***-**-67') && sheet.includes('уйдёт 1 файл') && (await page.locator('.sheet #reject-text').inputValue()).includes('— во вложении.'), 'шторка «Отправить»: ответ в поле, можно поправить; сказано про файл');
+      ok((await page.locator('.sheet #reject-text').getAttribute('maxlength')) === '4000' && await page.locator('.sheet [data-cr-warn]').count() === 0, 'ответ — до 4000 знаков');
+      await shot(page, '39-zapros-otpravit');
+      await page.locator('.sheet #reject-text').fill('   ');
+      await page.locator('.sheet [data-act="cr-send-confirm"]').click();
+      await settle(page, 400);
+      ok(await page.locator('.sheet #reject-err').isVisible() && C.log.length === 0, 'пустой ответ не отправляется');
+      await page.locator('.sheet #reject-text').fill('Акт сверки с ТОО «Тест Контрагент» за 01.01.2026–11.11.2026 — во вложении.');
+      C.plan = ['503', 'abort', 'ok'];
+      await page.locator('.sheet [data-act="cr-send-confirm"]').click();
+      await settle(page, 800);
+      ok(norm(await page.locator('.decision-state').innerText()).includes('1С сейчас недоступна'), '503 — «1С сейчас недоступна», «Повторить»');
+      await page.locator('.sheet [data-act="cr-retry"]').click();
+      await settle(page, 800);
+      ok(norm(await page.locator('.decision-state').innerText()).includes('Нет связи'), 'обрыв связи — «Нет связи», «Повторить»');
+      await page.locator('.sheet [data-act="cr-retry"]').click();
+      await page.waitForSelector('.done-overlay.show', { timeout: 6000 });
+      ok(norm(await page.locator('.done-title').innerText()) === 'Отправлено контрагенту', 'после 200 — «Отправлено контрагенту»');
+      const s3 = C.log.slice(-3);
+      ok(s3.length === 3 && s3.every((x) => x.action === 'send' && x.key && x.key === s3[0].key), 'POST …/send; повторы после 503 и обрыва — с тем же Idempotency-Key');
+      ok(s3.every((x) => x.body && x.body.text === null && x.body.comment === null), 'текст не меняли — в теле text: null');
+      await page.waitForFunction(() => location.hash === '#/cr');
+      await settle(page, 1200);
+      ok(await page.locator(`${scr} .req-card`).count() === 2 && norm(await page.locator(`${scr} .seg-btn.on`).innerText()).trim() === 'Ждут · 2', 'после отправки — список, осталось два запроса');
+
+      // незнакомый номер: предупреждение, исправленный текст, 422 по длине, 409 «решил другой»
+      await page.locator(`${scr} .req-wrap[data-id="cr_2"] .req-card`).click();
+      await settle(page, 900);
+      const warn = norm(await page.locator(`${scr} [data-cr-warn]`).innerText());
+      ok(warn.includes('Номер не из контактов контрагента') && warn.includes('только если уверены, что пишет сотрудник этой компании'), 'known_phone: false — заметное предупреждение в карточке');
+      const wbox = await page.locator(`${scr} [data-cr-warn]`).boundingBox();
+      ok(wbox && wbox.y < 420, 'предупреждение стоит вверху карточки, без прокрутки');
+      await shot(page, '40-zapros-neznakomyy-nomer');
+      await page.locator(`${scr} [data-act="cr-send"]`).click();
+      await settle(page, 450);
+      ok(await page.locator('.sheet [data-cr-warn]').count() === 1, 'предупреждение повторено в шторке «Отправить»');
+      await page.locator('.sheet #reject-text').fill('  Задолженность на 11.11.2026 — 640 000 ₸. Подробности пришлём письмом.  ');
+      C.plan = ['long'];
+      await page.locator('.sheet [data-act="cr-send-confirm"]').click();
+      await settle(page, 700);
+      ok(await page.locator('.sheet #reject-err').isVisible() && norm(await page.locator('.sheet #reject-err').innerText()).includes('не больше 4000 символов') && await page.locator('.sheet [data-act="cr-send-confirm"]').isEnabled(), '422 validation_error — ошибка у поля, шторка остаётся');
+      ok(C.log[C.log.length - 1].body.text === 'Задолженность на 11.11.2026 — 640 000 ₸. Подробности пришлём письмом.', 'исправленный текст уходит в теле text, без пробелов по краям');
+      C.plan = ['decided'];
+      await page.locator('.sheet [data-act="cr-send-confirm"]').click();
+      await settle(page, 700);
+      const dec = norm(await page.locator('.decision-state').innerText());
+      ok(dec.includes('Запрос уже решён') && dec.includes('Ответ уже отправлен: Тест Коллега, сегодня, 10:05') && dec.includes('Ваше решение не отправлено'), '409 already_decided — кто и когда решил (details)');
+      const two = C.log.slice(-2).map((x) => x.key);
+      ok(two[0] && two[1] && two[0] !== two[1], 'после окончательного отказа следующее нажатие — с новым ключом');
+      await shot(page, '41-zapros-uzhe-reshen');
+      await page.locator('.sheet [data-act="cr-to-list"]').click();
+      await settle(page, 900);
+      ok((await page.evaluate(() => location.hash)) === '#/cr', '«К списку запросов» — список');
+
+      // «Отклонить»: комментарий обязателен
+      await openCard('cr_2');
+      await page.locator(`${scr} [data-act="cr-reject"]`).click();
+      await settle(page, 450);
+      ok(norm(await page.locator('.sheet').innerText()).includes('увидят только коллеги'), 'шторка «Отклонить»: комментарий контрагенту не уходит');
+      const before = C.log.length;
+      await page.locator('.sheet [data-act="cr-reject-confirm"]').click();
+      await settle(page, 400);
+      ok(await page.locator('.sheet #reject-err').isVisible() && C.log.length === before, 'без комментария отклонить нельзя — запрос не уходит');
+      await page.locator('.sheet .chip[data-v="Номер не из нашей базы"]').click();
+      C.plan = ['wrong', 'ok'];
+      await page.locator('.sheet [data-act="cr-reject-confirm"]').click();
+      await settle(page, 700);
+      const af = norm(await page.locator('.decision-state').innerText());
+      ok(af.includes('Действие не выполнено') && af.includes('Контрагент помечен на удаление. Запрос остался без изменений.'), '422 action_failed — message из учёта');
+      await page.locator('.sheet [data-act="cr-refresh"]').click();
+      await settle(page, 900);
+      await page.locator(`${scr} [data-act="cr-reject"]`).click();
+      await settle(page, 450);
+      await page.locator('.sheet #reject-text').fill('Номер не из нашей базы');
+      await page.locator('.sheet [data-act="cr-reject-confirm"]').click();
+      await page.waitForSelector('.done-overlay.show', { timeout: 6000 });
+      const rj = C.log[C.log.length - 1];
+      ok(rj.action === 'reject' && rj.body.comment === 'Номер не из нашей базы' && rj.key && norm(await page.locator('.done-title').innerText()) === 'Запрос отклонён', 'POST …/reject с комментарием и Idempotency-Key → «Запрос отклонён»');
+      await page.waitForFunction(() => location.hash === '#/cr');
+      await settle(page, 1200);
+
+      // задача: только «Закрыть»
+      await page.locator(`${scr} .req-wrap[data-id="cr_3"] .req-card`).click();
+      await settle(page, 900);
+      ok(await page.locator(`${scr} [data-act="cr-done"]`).isVisible() && await page.locator(`${scr} [data-act="cr-send"]`).count() === 0 && await page.locator(`${scr} [data-act="cr-reject"]`).count() === 0, 'kind: task — только «Закрыть задачу»');
+      ok(norm(await page.locator(`${scr} .rh-who`).innerText()) === 'Контрагент не определён' && await page.locator(`${scr} [data-cr-warn]`).count() === 1 && await page.locator(`${scr} [data-cr-answer]`).count() === 0, 'задача от незнакомого номера: контрагента нет, предупреждение есть, блока ответа нет');
+      await shot(page, '42-zapros-zadacha');
+      await page.locator(`${scr} [data-act="cr-done"]`).click();
+      await settle(page, 450);
+      C.plan = ['504-applied'];
+      await page.locator('.sheet [data-act="cr-done-confirm"]').click();
+      await settle(page, 800);
+      ok(norm(await page.locator('.decision-state').innerText()).includes('Сервер не ответил'), '504 — «Сервер не ответил», «Повторить»');
+      await page.locator('.sheet [data-act="cr-retry"]').click();
+      await page.waitForSelector('.done-overlay.show', { timeout: 6000 });
+      const dn = C.log.slice(-2);
+      ok(dn.every((x) => x.action === 'done' && x.key === dn[0].key) && dn[0].body.comment === null && norm(await page.locator('.done-title').innerText()) === 'Задача закрыта', 'POST …/done без комментария; повтор после 504 с тем же ключом (Idempotent-Replayed) → «Задача закрыта»');
+      await page.waitForFunction(() => location.hash === '#/cr');
+      await settle(page, 1200);
+      ok(await page.locator(`${scr} .req-card`).count() === 0 && norm(await page.locator(scr).innerText()).includes('Запросов нет'), 'все решены — «Запросов нет»');
+      await page.locator(`${scr} [data-back]`).click();
+      await page.waitForFunction(() => location.hash !== '#/cr', null, { timeout: 8000 });
+      ok(true, '«Назад» из списка после решений уводит с него с первого нажатия');
+      await page.evaluate(() => { location.hash = '#/home'; });
+      await settle(page, 900);
+      const empty = norm(await page.locator(`${scr} .cr-home`).innerText());
+      ok(empty.includes('Запросы контрагентов') && empty.includes('Новых запросов нет'), 'главная: «Новых запросов нет» — вход остаётся');
+      noErrors(errors);
+      await ctx.close();
+    }
+    {
+      // отправка подтверждена, но WhatsApp не принял (status: failed); push и уведомления
+      const { ctx, page, errors, ctl } = await newCtx(devices['iPhone 13'], { orgs: [{ ...ORG, counterparty_requests: 3 }, ORG2], cr: { items: crItems(), plan: ['send-failed'] } });
+      await page.goto(`${BASE}#/cr/cr_1?org=org_test&n=n_7`);
+      await settle(page, 800);
+      await login(page, ctl, { expect: '#/cr/cr_1' });
+      const scr = '.screen:not(.leaving)';
+      ok((await page.evaluate(() => location.hash)) === '#/cr/cr_1' && norm(await page.locator(`${scr} .rh-who`).innerText()) === 'ТОО «Тест Контрагент»', 'push без входа: после входа открылась карточка запроса (организаций две — выбор пропущен)');
+      ok(ctl.calls.some((c) => c.path === '/notifications/read' && c.body && (c.body.ids || []).includes('n_7')), 'уведомление из push отмечено прочитанным');
+      await page.locator(`${scr} [data-act="cr-send"]`).click();
+      await settle(page, 450);
+      await page.locator('.sheet [data-act="cr-send-confirm"]').click();
+      await page.waitForSelector('.toast.show', { timeout: 6000 });
+      ok(norm(await page.locator('.toast').innerText()).includes('отправить пока не удалось') && (await page.evaluate(() => location.hash)) === '#/cr/cr_1' && await page.locator('.done-overlay').count() === 0, 'status: failed — «отправить пока не удалось, 1С повторит», без «Отправлено»');
+      await settle(page, 500);
+      ok(norm(await page.locator(`${scr} .status-chip`).innerText()) === 'Не отправлено — 1С повторит' && await page.locator(`${scr} .actionbar`).count() === 0 && await page.locator(`${scr} [data-cr-event="send_failed"]`).count() === 1, 'карточка из ответа: статус «Не отправлено — 1С повторит», кнопок нет, событие в истории');
+      await page.waitForFunction(() => !document.querySelector('.toast.show'), null, { timeout: 8000 });
+      // push на запрос, которого уже нет: 404 → список
+      await page.evaluate(() => { location.hash = '#/cr/cr_gone?org=org_test&n=n_8'; });
+      await page.waitForFunction(() => location.hash === '#/cr', null, { timeout: 8000 });
+      await settle(page, 900);
+      ok(await page.locator(`${scr} [data-cr-list="pending"]`).count() === 1 && norm(await page.locator('.toast').innerText()).includes('Запрос не найден'), 'push на решённый или удалённый запрос (404) — список и подсказка');
+      // строка в уведомлениях
+      ctl.override = (call, { json }) => (call.path === '/notifications' ? (json(200, { unread_count: 1, items: [
+        { id: 'n_c1', org_id: 'org_test', type: 'counterparty_request', created_at: T(TODAY, '10:02'), title: 'Запрос контрагента', text: 'Откройте, чтобы посмотреть', link: { kind: 'counterparty_request', counterparty_request_id: 'cr_3' }, read: false },
+        { id: 'n_c2', org_id: 'org_test', type: 'counterparty_request', created_at: T(TODAY, '09:40'), title: 'Запрос контрагента', text: 'Откройте, чтобы посмотреть', link: { kind: 'none' }, read: true },
+      ], next_cursor: null }), true) : false);
+      await page.evaluate(() => { location.hash = '#/notifications'; });
+      await settle(page, 900);
+      ok(await page.locator(`${scr} .notif`).count() === 2 && norm(await page.locator(`${scr} .notif`).first().innerText()).includes('Запрос контрагента'), 'уведомления: строка «Запрос контрагента»');
+      await page.locator(`${scr} .notif`).first().click();
+      await page.waitForFunction(() => location.hash === '#/cr/cr_3', null, { timeout: 8000 });
+      ok(true, 'строка уведомления со ссылкой открывает карточку запроса');
+      await page.evaluate(() => { location.hash = '#/notifications'; });
+      await settle(page, 900);
+      await page.locator(`${scr} .notif`).nth(1).click();
+      await page.waitForFunction(() => location.hash === '#/cr', null, { timeout: 8000 });
+      ok(true, 'строка уведомления без ссылки открывает список запросов');
+      noErrors(errors);
+      await ctx.close();
+    }
+
     // ---------- 5. настройки, уведомления, отчёты, выход ----------
     console.log('\n▶ Настройки, уведомления, отчёты, выход');
     {
@@ -2543,6 +2862,13 @@ const PUSH_STUB = () => {
       handlers.push({ data: { json: () => ({ type: 'something_new', title: 'Новое событие' }) }, waitUntil: (p) => { wait = p; } });
       await wait;
       ok(shown[1] && shown[1].o.data.hash === '#/notifications', 'неизвестный type → список уведомлений');
+      // 13.22: запрос контрагента
+      handlers.push({ data: { json: () => ({ type: 'counterparty_request', title: 'Запрос контрагента', body: 'Откройте, чтобы посмотреть', org_id: 'org_alfa', counterparty_request_id: 'cr_41a0', notification_id: 'n_9a07', sent_at: T(TODAY, '10:12') }) }, waitUntil: (p) => { wait = p; } });
+      await wait;
+      ok(shown[2] && shown[2].t === 'Запрос контрагента' && shown[2].o.data.hash === '#/cr/cr_41a0?org=org_alfa&n=n_9a07' && shown[2].o.tag === 'cr-cr_41a0', 'push counterparty_request → карточка запроса нужной организации с notification_id');
+      handlers.push({ data: { json: () => ({ type: 'counterparty_request', org_id: 'org_alfa' }) }, waitUntil: (p) => { wait = p; } });
+      await wait;
+      ok(shown[3] && shown[3].t === 'Запрос контрагента' && shown[3].o.data.hash === '#/cr?org=org_alfa', 'push без идентификатора запроса → список запросов');
     }
 
     // ---------- 6б. этап 2: 501 not_implemented ----------

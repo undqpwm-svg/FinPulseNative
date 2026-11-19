@@ -58,6 +58,12 @@ export const api = {
   request: (org, id) => call('request_', org, id),
   attachment: (org, id, att) => call('attachment', org, id, att),
   decide: (org, id, p) => call('decide', org, id, p),
+  // запросы контрагентов (бот в WhatsApp): есть ли экран и сколько ждёт, список, карточка, файл, решение
+  crCount: (org) => call('crCount', org),
+  crList: (org, tab) => call('crList', org, tab),
+  crCard: (org, id) => call('crCard', org, id),
+  crFile: (org, id, file) => call('crFile', org, id, file),
+  crDecide: (org, id, p) => call('crDecide', org, id, p),
   report: (org, kind) => call('report', org, kind),
   reportList: (org) => call('reportList', org),
   projects: (org, filters) => call('projects', org, filters),

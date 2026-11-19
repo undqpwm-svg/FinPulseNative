@@ -294,6 +294,8 @@ function orgDto(o) {
   return {
     id: o.id,
     reports: reportTabs(o.reports),
+    // Запросы контрагентов (13.17): число ожидающих или null — экрана нет (бот выключен, база до 1.17.0, нет роли).
+    counterparty: typeof o.counterparty_requests === 'number' ? o.counterparty_requests : null,
     name: o.name,
     short: o.short_name || o.name,
     initials: o.initials,
@@ -315,7 +317,7 @@ export async function orgs() {
 
 async function orgInfo(id) {
   if (!orgsCache || !orgsCache.some((o) => o.id === id)) await orgs();
-  return orgsCache.find((o) => o.id === id) || { id, name: '', short: '', initials: '' };
+  return orgsCache.find((o) => o.id === id) || { id, name: '', short: '', initials: '', counterparty: null };
 }
 
 // Какие отчёты показывать на вкладке «Отчёты» у этой организации. Список организаций уже загружен — без запроса.
@@ -591,6 +593,108 @@ export async function decide(id, reqId, { decision, comment, idempotencyKey }) {
   };
 }
 
+// ---------- запросы контрагентов (13.17–13.21, с 1С 1.17.0) ----------
+// Экран по образцу заявок: ответы бота контрагентов, которые ждут подтверждения бухгалтера, и задачи бухгалтеру.
+// Есть ли экран у организации и сколько запросов ждёт — поле counterparty_requests в /orgs: null — экрана нет.
+export async function crCount(id) {
+  return (await orgInfo(id)).counterparty;
+}
+// Число ожидающих знает и сам список: значок на входе в экран не ждёт следующего чтения /orgs.
+function setCrCount(id, n) {
+  const o = orgsCache && orgsCache.find((x) => x.id === id);
+  if (o && o.counterparty !== null) o.counterparty = Math.max(0, n);
+}
+
+const CR_KINDS = ['answer', 'unknown', 'task'];
+const CR_STATUS = ['pending', 'sent', 'rejected', 'done', 'failed'];
+const personName = (p) => (typeof p === 'string' ? p : (p && p.name) || '');
+
+function crItemDto(r) {
+  return {
+    id: r.id,
+    kind: CR_KINDS.includes(r.kind) ? r.kind : 'task', // незнакомый вид показываем как задачу: без «Отправить»
+    known: CR_KINDS.includes(r.kind),
+    status: CR_STATUS.includes(r.status) ? r.status : 'pending',
+    intent: r.intent || null,
+    title: r.title || '',
+    counterparty: typeof r.counterparty === 'string' ? r.counterparty : (r.counterparty && r.counterparty.name) || '',
+    phone: r.phone_masked || '', // номер приходит уже частично скрытым — показываем как есть
+    createdAt: r.created_at || null,
+    decidedAt: r.decided_at || null,
+  };
+}
+
+function crCardDto(r) {
+  const d = r.decision;
+  return {
+    today: dateOf(r.updated_at),
+    ...crItemDto(r),
+    bin: (r.counterparty && r.counterparty.bin) || '',
+    contact: (r.contact && r.contact.name) || '',
+    knownPhone: r.known_phone !== false, // предупреждение — только по явному false
+    question: r.question || '',
+    text: r.text || '',
+    files: (r.files || []).map((f) => ({ id: f.id, name: f.name || 'Файл', size: sizeText(f.size), contentType: f.content_type || '' })),
+    decision: d ? { action: d.action, by: personName(d.by), at: d.at || null, comment: d.comment || '' } : null,
+    decidedAt: (d && d.at) || r.decided_at || null,
+    history: (r.history || []).map((h) => ({ at: h.at || null, event: h.event, by: personName(h.by), comment: h.comment || '' })),
+    canDecide: r.status === 'pending',
+  };
+}
+
+export async function crList(id, tab) {
+  const items = [];
+  let cursor = null;
+  let updatedAt = null;
+  let more = false;
+  for (let page = 0; page < 5; page++) { // не больше 500 запросов
+    const r = await getJSON(orgPath(id, `/counterparty-requests?${qs({ tab: tab === 'done' ? 'done' : 'pending', limit: 100, cursor })}`));
+    updatedAt = updatedAt || r.updated_at;
+    items.push(...(r.items || []));
+    cursor = r.next_cursor;
+    more = !!cursor;
+    if (!cursor) break;
+  }
+  if (tab !== 'done' && !more) setCrCount(id, items.length);
+  return { today: dateOf(updatedAt), items: items.map(crItemDto), more };
+}
+
+export const crCard = async (id, crId) => crCardDto(await getJSON(orgPath(id, `/counterparty-requests/${enc(crId)}`)));
+
+// Файл запроса (13.20) — как вложение заявки: потоком с авторизацией → object URL для просмотра.
+export async function crFile(id, crId, fileId) {
+  const path = orgPath(id, `/counterparty-requests/${enc(crId)}/files/${enc(fileId)}`);
+  const f = await once(`GET ${path}`, async () => {
+    const res = await authed('GET', path, { headers: { Accept: '*/*' } });
+    return { blob: await res.blob(), type: res.headers.get('Content-Type') || '' };
+  });
+  return { kind: 'pdf', url: URL.createObjectURL(f.blob), contentType: f.type };
+}
+
+// Решение (13.21): send — отправить контрагенту (text — исправленный ответ или null), reject — отклонить (комментарий
+// обязателен), done — закрыть задачу. Ответ — карточка; после send статус sent или failed (1С повторит отправку сама).
+const CR_ACTIONS = ['send', 'reject', 'done'];
+
+export async function crDecide(id, crId, { action, text, comment, idempotencyKey }) {
+  if (!CR_ACTIONS.includes(action)) throw new ApiError('server_error', `Неизвестное действие ${action}`);
+  const body = action === 'send' ? { text: text || null, comment: comment || null } : { comment: comment || null };
+  let res;
+  try {
+    res = await authed('POST', orgPath(id, `/counterparty-requests/${enc(crId)}/${action}`), { body, headers: { 'Idempotency-Key': idempotencyKey } });
+  } catch (e) {
+    if (e.code === 'already_decided') {
+      e.details = { ...e.details, status: e.details.decision || '', by: personName(e.details.decided_by), at: e.details.decided_at || null };
+    }
+    throw e;
+  }
+  const card = await res.json();
+  if (card && card.status && card.status !== 'pending') {
+    const o = orgsCache && orgsCache.find((x) => x.id === id);
+    if (o && typeof o.counterparty === 'number' && res.headers.get('Idempotent-Replayed') !== 'true' && card.replayed !== true) setCrCount(id, o.counterparty - 1);
+  }
+  return { card: crCardDto(card), replayed: res.headers.get('Idempotent-Replayed') === 'true' || card.replayed === true };
+}
+
 // ---------- отчёты (7) ----------
 const MONTH_GEN = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
 function weekFull(w) {
@@ -685,11 +789,13 @@ export async function project(id, projectId) {
 }
 
 // ---------- уведомления (8) ----------
-const N_TYPE = { payment_corrected: 'payment', payment_cancelled: 'payment', decision: 'approved', limit: 'gap', balances: 'summary' };
+const N_TYPE = { payment_corrected: 'payment', payment_cancelled: 'payment', decision: 'approved', limit: 'gap', balances: 'summary', counterparty_request: 'cr' };
 
 function linkStr(l) {
   if (!l) return null;
   if (l.kind === 'request' && l.request_id) return `request:${l.request_id}`;
+  // Запрос контрагента (13.22): карточка; без идентификатора — список.
+  if (l.kind === 'counterparty_request') return l.counterparty_request_id || l.request_id ? `cr:${l.counterparty_request_id || l.request_id}` : 'cr';
   if (l.kind === 'calendar' && l.date) return `calendar:${l.date}`;
   if (l.kind === 'summary') return 'summary';
   if (l.kind === 'debtors') return 'reports:debtors';
@@ -708,7 +814,7 @@ export async function notifications(id) {
       title: n.title,
       text: n.text,
       read: !!n.read,
-      link: linkStr(n.link),
+      link: linkStr(n.link) || (n.type === 'counterparty_request' ? 'cr' : null),
     })),
   };
 }

@@ -13,6 +13,7 @@ const defaults = () => ({
   auth: { logged: false, phone: '' },
   orgId: null,
   decisions: {},
+  cr: {}, // решения по запросам контрагентов: id → { status, comment, text, d, t }
   read: {},
   events: [],
   toggles: { summary: true, requests: true, payments: true, gaps: true, whatsapp: true },
@@ -137,6 +138,23 @@ export function decide(id, status, comment = '') {
     link: `request:${id}`,
     read: true,
   });
+  save();
+}
+
+// ---------- запросы контрагентов (бот в WhatsApp) ----------
+// Есть ли экран у организации — по наличию counterpartyRequests в данных. Решения пользователя лежат в state.cr.
+export const hasCr = (o = org()) => Array.isArray(o.counterpartyRequests);
+export function crRequests(o = org()) {
+  return (o.counterpartyRequests || []).map((r) => {
+    const dec = state.cr[r.id];
+    return dec
+      ? { ...r, status: dec.status, decided: { d: dec.d, t: dec.t, by: data.user.name, comment: dec.comment }, text: dec.text || r.text, mine: true }
+      : { ...r, status: r.status || 'pending' };
+  });
+}
+export const crRequest = (id, o = org()) => crRequests(o).find((r) => r.id === id);
+export function crDecide(id, status, { comment = '', text = '' } = {}) {
+  state.cr[id] = { status, comment, text, d: 0, t: nowHM() };
   save();
 }
 

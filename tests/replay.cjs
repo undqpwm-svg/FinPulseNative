@@ -3,7 +3,8 @@
 // Приложение открывается в браузере, все его запросы к API подменяются: вход — условный, остальные GET — из папки.
 // Сценарий проходит лист «Счета» (если снят GET /orgs/{org}/accounts), календарь (если снят GET /orgs/{org}/calendar),
 // вкладку «Отчёты» (все отчёты из reports в /orgs),
-// список проектов, отборы и карточки, для которых есть снятые ответы; сохраняет снимки и текст каждого экрана —
+// список проектов, отборы и карточки, для которых есть снятые ответы; экран «Запросы контрагентов» (если сняты
+// GET /orgs/{org}/counterparty-requests?tab=…&limit=100 и карточки); сохраняет снимки и текст каждого экрана —
 // по тексту цифры сверяются с 1С. Ответ календаря заодно проверяется на арифметику контракта 5.3.
 //
 // Запуск: node tests/replay.cjs <папка с ответами> [--out <папка результата>] [--org <id организации>]
@@ -682,6 +683,116 @@ function serve() {
         await capture(`${tag}-tablicy`, `проект ${id}, таблицы`);
         await page.evaluate(() => (location.hash = '#/reports/projects'));
         await settle(700);
+      }
+    }
+
+    // ---------- запросы контрагентов (13.17–13.21) ----------
+    // Список снимается ровно так, как его просит приложение: ?tab=pending&limit=100 и ?tab=done&limit=100.
+    // Ответы на решения (POST …/send, …/reject, …/done) приложение в прогоне не шлёт — они сверяются с контрактом
+    // как данные.
+    {
+      const CR = `/orgs/${org.id}/counterparty-requests`;
+      const KINDS = ['answer', 'unknown', 'task'];
+      const STATUSES = ['pending', 'sent', 'rejected', 'done', 'failed'];
+      const masked = (p) => typeof p === 'string' && p.includes('*') && !/\d{7,}/.test(p.replace(/[\s()+-]/g, ''));
+      const lists = dumps.filter((d) => d.path === CR);
+      if (!lists.length) {
+        note('запросы контрагентов не проверялись: ответ GET …/counterparty-requests не снят');
+      } else {
+        console.log('\n▶ Запросы контрагентов (13.17–13.19)');
+        ok(typeof org.counterparty_requests === 'number', `в /orgs у организации counterparty_requests — число: ${JSON.stringify(org.counterparty_requests ?? null)}`);
+        await page.evaluate(() => (location.hash = '#/home'));
+        await settle(1500);
+        const entry = page.locator(`${screen} .cr-home`);
+        ok((await entry.count()) === (typeof org.counterparty_requests === 'number' ? 1 : 0), `вход на экран с главной ${await entry.count() ? 'есть' : 'отсутствует'} — как задаёт counterparty_requests`);
+        if (await entry.count()) console.log(`    ${norm(await entry.innerText()).replace(/\s+/g, ' ').trim()}`);
+        for (const tab of ['pending', 'done']) {
+          const d = dumps.find((x) => x.key === keyOf(CR, new URLSearchParams(`tab=${tab}&limit=100`)));
+          if (!d) {
+            note(`запросы контрагентов, вкладка ${tab}: ответ ?tab=${tab}&limit=100 не снят`);
+            continue;
+          }
+          const items = (d.body && d.body.items) || [];
+          ok(d.status === 200 && Array.isArray(d.body.items), `tab=${tab}: ответ 200, items — массив (${items.length})`);
+          const wrong = items.filter((x) => !x.id || !KINDS.includes(x.kind) || !STATUSES.includes(x.status) || typeof x.title !== 'string' || !x.created_at);
+          ok(!wrong.length, `tab=${tab}: у каждой строки id, kind, status, title, created_at${wrong.length ? ` — не так у ${wrong.length}` : ''}`);
+          ok(items.every((x) => masked(x.phone_masked)), `tab=${tab}: номера частично скрыты (phone_masked)`);
+          ok(items.every((x) => (x.status === 'pending') === (tab === 'pending')), `tab=${tab}: статусы строк соответствуют вкладке`);
+          const times = items.map((x) => Date.parse(tab === 'pending' ? x.created_at : x.decided_at || x.created_at));
+          ok(times.every((t, i) => i === 0 || (tab === 'pending' ? t >= times[i - 1] : t <= times[i - 1])), `tab=${tab}: порядок — ${tab === 'pending' ? 'старые сверху' : 'новые сверху'}`);
+          if (d.body.next_cursor) note(`tab=${tab}: есть next_cursor — следующую страницу приложение запросит, она не снята`);
+          await page.evaluate(() => (location.hash = '#/cr'));
+          await settle(1200);
+          const tabBtn = page.locator(`${screen} [data-act="cr-tab"][data-v="${tab}"]`);
+          if (await tabBtn.count()) await tabBtn.click();
+          await settle(1200);
+          const s = await capture(`zaprosy-kontragentov-${tab}`, `запросы контрагентов, ${tab}`);
+          const shown = await page.locator(`${screen} [data-cr-list="${tab}"] .req-card`).count();
+          ok(!s.errCode && shown === items.length, `вкладка ${tab === 'pending' ? '«Ждут»' : '«Решённые»'}: строк на экране ${shown}, в ответе ${items.length}${s.errCode ? ` — ошибка ${s.errCode}` : ''}`);
+          const texts = await page.locator(`${screen} [data-cr-list] .req-card`).evaluateAll((els) => els.map((e) => e.innerText.replace(/ /g, ' ')));
+          ok(items.every((x, i) => (texts[i] || '').includes(x.phone_masked) && (texts[i] || '').includes(x.title)), `вкладка ${tab}: в каждой строке — title и номер ровно как в ответе`);
+          if (tab === 'pending' && typeof org.counterparty_requests === 'number' && !d.body.next_cursor) {
+            if (org.counterparty_requests !== items.length) note(`counterparty_requests в /orgs — ${org.counterparty_requests}, в списке ожидающих — ${items.length} (ответы сняты в разное время?)`);
+          }
+        }
+        // карточки
+        const cards = dumps.filter((d) => d.path.startsWith(`${CR}/`) && d.path.slice(CR.length + 1).split('/').length === 1);
+        if (!cards.length) note('карточки запросов не проверялись: ответы не сняты');
+        for (const c of cards) {
+          const id = c.path.slice(CR.length + 1);
+          console.log(`\n▶ Запрос контрагента ${id}`);
+          await page.evaluate(() => (location.hash = '#/home'));
+          await settle(500);
+          await page.evaluate((h) => (location.hash = h), `#/cr/${encodeURIComponent(id)}`);
+          await settle(1600);
+          const tag = `zapros-${id.replace(/[^\w-]+/g, '_').slice(-20)}`;
+          if (c.status !== 200) {
+            ok((await page.evaluate(() => location.hash)) === '#/cr', `ответ ${c.status} — приложение показывает список запросов`);
+            continue;
+          }
+          const b = c.body;
+          const s = await capture(tag, `запрос ${id}`);
+          ok(!s.errCode && (await page.evaluate(() => location.hash)).startsWith('#/cr/'), `карточка открылась${s.errCode ? ` — ошибка ${s.errCode}` : ''}`);
+          if (s.errCode) continue;
+          console.log(`    ${firstLines(s.text, 10)}`);
+          ok(KINDS.includes(b.kind) && STATUSES.includes(b.status), `kind ${b.kind}, status ${b.status} — из контракта`);
+          ok(masked(b.phone_masked) && norm(await page.locator(`${screen} [data-cr-phone]`).innerText()) === b.phone_masked, 'телефон на экране — ровно phone_masked, частично скрыт');
+          ok(typeof b.known_phone === 'boolean' && (await page.locator(`${screen} [data-cr-warn]`).count()) === (b.known_phone === false ? 1 : 0), `known_phone: ${b.known_phone} — предупреждение ${b.known_phone === false ? 'есть' : 'не показано'}`);
+          ok(s.text.includes(b.title) && (!b.counterparty || s.text.includes(b.counterparty.name)) && (!b.question || s.text.includes(b.question.trim().slice(0, 40))), 'на экране title, контрагент и вопрос из ответа');
+          const pending = b.status === 'pending';
+          const want = !pending ? [] : b.kind === 'task' ? ['cr-done'] : ['cr-reject', 'cr-send'];
+          const got = await page.locator(`${screen} .actionbar [data-act]`).evaluateAll((els) => els.map((e) => e.getAttribute('data-act')));
+          ok(JSON.stringify(got) === JSON.stringify(want), `кнопки по kind и status: ${got.join(', ') || 'нет'}`);
+          ok((await page.locator(`${screen} [data-act="cr-file"]`).count()) === (b.files || []).length, `вложений на экране ${(b.files || []).length} — как в ответе`);
+          ok((await page.locator(`${screen} [data-cr-history] .rt`).count()) === (b.history || []).length && (b.history || []).length > 0, `история: событий ${(b.history || []).length}`);
+          const odd = (b.history || []).map((h) => h.event).filter((e) => !['created', 'sent', 'rejected', 'done', 'send_failed', 'delivered', 'read'].includes(e));
+          ok(!odd.length, `события истории — из контракта${odd.length ? ` (незнакомые: ${[...new Set(odd)].join(', ')})` : ''}`);
+          ok(b.decision === null || (b.decision && ['sent', 'rejected', 'done'].includes(b.decision.action) && b.decision.by && b.decision.at), `decision: ${b.decision ? `${b.decision.action}, есть by и at` : 'null'}`);
+          if (pending && b.kind !== 'task') {
+            await page.locator(`${screen} [data-act="cr-send"]`).click();
+            await settle(500);
+            const val = await page.locator('.sheet #reject-text').inputValue();
+            ok(val === (b.text || ''), 'шторка «Отправить»: в поле — text из ответа');
+            await capture(`${tag}-otpravit`, `запрос ${id}, «Отправить»`);
+            await page.locator('.sheet [data-act="sheet-close"].btn').click();
+            await settle(400);
+          }
+        }
+        // ответы на решения — как данные
+        const acts = dumps.filter((d) => /\/counterparty-requests\/[^/]+\/(send|reject|done)$/.test(d.path));
+        if (acts.length) console.log('\n▶ Ответы на решения (13.21) — сверка с контрактом');
+        for (const a of acts) {
+          const action = a.path.split('/').pop();
+          if (a.status === 200) {
+            const exp = { send: ['sent', 'failed'], reject: ['rejected'], done: ['done'] }[action];
+            ok(a.body && exp.includes(a.body.status) && a.body.decision && a.body.decision.by && Array.isArray(a.body.history), `${action} → 200: карточка со status ${a.body && a.body.status}, decision и history${a.body && a.body.replayed ? ' (повтор, replayed)' : ''}`);
+          } else if (a.status === 409) {
+            const det = (a.body && a.body.details) || {};
+            ok(a.body.error === 'already_decided' && det.decided_by && det.decided_at && ['sent', 'rejected', 'done'].includes(det.decision), `${action} → 409 already_decided: в details decided_by, decided_at, decision (${det.decision})`);
+          } else {
+            ok(a.body && typeof a.body.error === 'string' && typeof a.body.message === 'string', `${action} → ${a.status} ${a.body && a.body.error}: есть error и message`);
+          }
+        }
       }
     }
 

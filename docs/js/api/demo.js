@@ -164,6 +164,7 @@ function orgDto(o) {
   const g = S.gap(o, ds);
   return {
     id: o.id, reports: demoReports(o), name: o.name, short: o.short, initials: o.initials, city: o.city, activity: o.activity,
+    counterparty: S.hasCr(o) ? S.crRequests(o).filter((r) => r.status === 'pending').length : null,
     summary: { money: S.opening(o).total, pending: S.pending(o).length, gap: g ? { date: iso(g.day.date), deficit: g.deficit } : null },
   };
 }
@@ -349,6 +350,84 @@ export async function decide(id, reqId, { decision, comment, idempotencyKey }) {
   return res;
 }
 
+// ---------- запросы контрагентов (бот в WhatsApp) ----------
+const crPending = (o) => S.crRequests(o).filter((r) => r.status === 'pending');
+const crStamp = (x) => (x ? stampIso(x.d, x.t) : null);
+const crKey = (x) => x.d * 10000 + Number(x.t.replace(':', ''));
+
+export async function crCount(id) {
+  const o = org(id);
+  return S.hasCr(o) ? crPending(o).length : null;
+}
+
+function crItemDto(r) {
+  return {
+    id: r.id, kind: r.kind, known: true, status: r.status, intent: r.intent || null, title: r.title,
+    counterparty: (r.counterparty && r.counterparty.name) || '', phone: r.phone,
+    createdAt: crStamp(r.created), decidedAt: crStamp(r.decided),
+  };
+}
+
+export async function crList(id, tab) {
+  const o = org(id);
+  if (!S.hasCr(o)) throw new ApiError('forbidden', 'Раздел недоступен', {}, 403);
+  const all = S.crRequests(o);
+  const items = tab === 'done'
+    ? all.filter((r) => r.status !== 'pending').sort((a, b) => crKey(b.decided) - crKey(a.decided)) // новые сверху
+    : all.filter((r) => r.status === 'pending').sort((a, b) => crKey(a.created) - crKey(b.created)); // старые сверху
+  return { today: iso(S.today()), items: items.map(crItemDto), more: false };
+}
+
+export async function crCard(id, crId) {
+  const o = org(id);
+  const r = S.crRequest(crId, o);
+  if (!r) throw new ApiError('not_found', 'Запрос не найден', {}, 404);
+  const history = [{ at: crStamp(r.created), event: 'created', by: '', comment: '' }];
+  if (r.decided) history.push({ at: crStamp(r.decided), event: r.status === 'failed' ? 'send_failed' : r.status, by: r.decided.by || '', comment: r.decided.comment || '' });
+  (r.after || []).forEach((h) => history.push({ at: stampIso(h.d, h.t), event: h.event, by: '', comment: '' }));
+  return {
+    today: iso(S.today()),
+    ...crItemDto(r),
+    bin: (r.counterparty && r.counterparty.bin) || '', contact: r.contact || '', knownPhone: r.knownPhone !== false,
+    question: r.question || '', text: r.text || '',
+    files: (r.files || []).map((f) => ({ id: f.id, name: f.name, size: f.size, contentType: 'application/pdf' })),
+    decision: r.decided ? { action: r.status, by: r.decided.by || '', at: crStamp(r.decided), comment: r.decided.comment || '' } : null,
+    history,
+    canDecide: r.status === 'pending',
+  };
+}
+
+// Просмотр файла в демо — заглушка документа: PDF в рабочей версии формирует 1С.
+export async function crFile(id, crId, fileId) {
+  const o = org(id);
+  const r = S.crRequest(crId, o);
+  const f = r && (r.files || []).find((x) => x.id === fileId);
+  if (!f) throw new ApiError('not_found', 'Файл не найден', {}, 404);
+  const d = f.doc || {};
+  return { kind: 'doc', name: f.name, title: d.title || f.name, sub: d.sub || '', rows: d.rows || [], note: d.note || '', from: o.name, to: (r.counterparty && r.counterparty.name) || '' };
+}
+
+const crApplied = new Map(); // ключ идемпотентности → ответ
+
+export async function crDecide(id, crId, { action, text, comment, idempotencyKey }) {
+  await wait(700);
+  if (crApplied.has(idempotencyKey)) return { ...crApplied.get(idempotencyKey), replayed: true };
+  const o = org(id);
+  const r = S.crRequest(crId, o);
+  if (!r) throw new ApiError('not_found', 'Запрос не найден', {}, 404);
+  if (r.status !== 'pending') {
+    throw new ApiError('already_decided', 'Запрос уже решён', { status: r.status, by: (r.decided && r.decided.by) || '', at: crStamp(r.decided) }, 409);
+  }
+  if (action === 'reject' && !String(comment || '').trim()) throw new ApiError('comment_required', 'Укажите комментарий', {}, 422);
+  if ((action === 'done') !== (r.kind === 'task')) throw new ApiError('action_failed', 'Это действие не подходит к запросу', {}, 422);
+  if (String(text || '').length > 4000) throw new ApiError('validation_error', 'Ответ — не длиннее 4000 символов', {}, 422);
+  S.setOrg(id);
+  S.crDecide(r.id, { send: 'sent', reject: 'rejected', done: 'done' }[action], { comment: comment || '', text: action === 'send' ? text || '' : '' });
+  const res = { card: await crCard(id, crId), replayed: false };
+  crApplied.set(idempotencyKey, res);
+  return res;
+}
+
 // ---------- отчёты ----------
 export async function report(id, kind) {
   const o = org(id);
@@ -523,4 +602,5 @@ export async function deletePushSubscription() {}
 export async function resetDemo() {
   S.resetDemo();
   applied.clear();
+  crApplied.clear();
 }

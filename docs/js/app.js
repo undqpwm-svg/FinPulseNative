@@ -19,7 +19,7 @@ const TABS = [
   { id: 'profile', hash: '#/profile', label: 'Профиль', icon: I.user },
 ];
 const TAB_TITLES = { home: 'Главная', calendar: 'Календарь', requests: 'Заявки', reports: 'Отчёты', profile: 'Профиль' };
-const DETAIL_META = { notifications: ['Уведомления', '#/home'], orgs: ['Организации', '#/home'], requests: ['Заявка', '#/requests'], reports: ['Проект', '#/reports/projects'] };
+const DETAIL_META = { notifications: ['Уведомления', '#/home'], orgs: ['Организации', '#/home'], requests: ['Заявка', '#/requests'], reports: ['Проект', '#/reports/projects'], cr: ['Запросы контрагентов', '#/home'] };
 
 let current = null; // { key, el, depth, tab }
 let lastHash = null;
@@ -98,7 +98,7 @@ async function route() {
     replaceHash(location.hash.split('?')[0]);
   }
   // Ссылка на заявку без входа (нажали на push, сессии нет) — запомнить и открыть после входа.
-  if (!api.session() && r.name === 'requests' && r.params[0]) rememberLink(location.hash);
+  if (!api.session() && (r.name === 'requests' || r.name === 'cr') && r.params[0]) rememberLink(location.hash);
   const redirect = guard(r);
   if (redirect) {
     replaceHash(redirect);
